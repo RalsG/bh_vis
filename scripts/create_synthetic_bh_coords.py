@@ -5,7 +5,8 @@ trajectories of two black holes in a decaying circular orbit. The orbital
 separation decreases over time, modeled by an error function. After generating
 the data, plot the X-Y projection of the trajectories using Matplotlib.
 
-Authors: Joey Perko, NLedge
+Author: Zachariah B. Etienne
+        zachetie **at** gmail **dot* com
 """
 import sys
 import scipy
