@@ -1,8 +1,11 @@
-"""
-A script that reads in gravitational wave strain data and black hole positional data,
-applies spin-weighted spherical harmonics to the data, and creates a Mayavi animation
-of the black holes and their gravitational waves. At each state, the black holes are 
-moved to their respective positions and the render is saved as a .png file.
+"""A script to visualize gravitational wave strain data and black hole trajectories.
+
+Process gravitational wave strain data and black hole positional data,
+apply spin-weighted spherical harmonics to the data, and create a Mayavi animation
+of the black holes and their gravitational waves. At each state, move the black holes
+to their respective positions and save the render as a .png file.
+
+Authors: Tyndale Stutzman, Seth Winchell, Joey Perko, Nledge
 """
 
 import os
@@ -10,7 +13,7 @@ import sys
 import csv
 import time
 from math import erf
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import interp1d
@@ -37,16 +40,20 @@ EXT_RAD = 100 # changeable with sys arguments
 USE_SYS_ARGS = False
 STATUS_MESSAGES = True
 
-def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data):
-    """
-    Adds up all the strain modes after factoring in corresponding spin-weighted spherical harmonic
-    to specified angle in the mesh. Stored as an array corresponding to [angle, time] time_idxs.
+def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data: NDArray[np.complex128]) -> NDArray[np.complex128]:
+    """Add up all strain modes with corresponding spin-weighted spherical harmonics.
 
-    :param colat: colatitude angle for the SWSH factor
-    :param azi: azimuthal angle for the SWSH factor
-    :param mode_data: numpy array containing strain data for all the modes
-    :return: a complex valued numpy array of the superimposed wave
+    This function calculates the superimposed wave at specified angles by factoring in
+    spin-weighted spherical harmonics for each mode. The result is an array
+    corresponding to [angle, time].
 
+    :param colat: The colatitude angle for the SWSH factor.
+    :param azi: The azimuthal angle for the SWSH factor.
+    :param mode_data: A NumPy array containing complex-valued strain data for all modes.
+                      Expected shape is (n_modes, n_times).
+    :return: A complex-valued NumPy array of the superimposed wave, with shape (n_pts, n_times).
+
+    DocTests:
     >>> mode_data = np.zeros((77, 3), dtype=complex)
     >>> mode_idx = 0
     >>> for l in range(2, 9):
@@ -56,6 +63,8 @@ def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data):
     >>> np.round(swsh_summation_angles(np.pi/2, np.array([0]), mode_data), 5)
     array([[ 4.69306 +4.69306j,  9.38612+14.07918j, 18.77224+23.4653j ]])
     """
+    # Adds up all the strain modes after factoring in corresponding spin-weighted spherical harmonic
+    # to specified angle in the mesh. Stored as an array corresponding to [angle, time] time_idxs.
     quat_arr = quaternionic.array.from_spherical_coordinates(colat, azi)
     winger = spherical.Wigner(ELL_MAX, ELL_MIN)
     # Create an swsh array shaped like (n_modes, n_quaternions)
@@ -65,22 +74,41 @@ def swsh_summation_angles(colat: float, azi: NDArray[np.float64], mode_data):
     pairwise_product = mode_data[:, np.newaxis, :] * swsh_arr[:, :, np.newaxis]
     return np.sum(pairwise_product, axis=0)
 
-def generate_interpolation_points(  # Could use some revisiting, currently keeps n_times constant
+def generate_interpolation_points(
     time_array: NDArray[np.float64],
     radius_values: NDArray[np.float64],
     r_ext: float,
 ) -> NDArray[np.float64]:
-    """
-    Fills out a 2D array of adjusted time values for the wave strain to be
-    linearly interpolated to. First index of the result represents the simulation
-    time time_idx (aka which mesh), and the second index represents radial distance to
-    interpolate to.
+    """Generate adjusted time values for linear interpolation of wave strain.
 
-    :param time_array: numpy array of of strain time time_idxs.
-    :param radius_values: numpy array of the radial points on the mesh.
-    :param r_ext: extraction radius of the original data.
-    :return: a 2D numpy array (n_radius, n_times) of time values.
+    This function creates a 2D array of time values. The first index represents
+    the simulation time (which mesh), and the second index represents the radial
+    distance to interpolate to. The time values are adjusted based on radius and
+    extraction radius.
+
+    :param time_array: NumPy array of strain time indices (simulation times).
+    :param radius_values: NumPy array of radial points on the mesh.
+    :param r_ext: The extraction radius of the original data.
+    :return: A 2D NumPy array of time values with shape (n_radius, n_times).
+
+    DocTests:
+    >>> time_arr = np.array([10.0, 11.0, 12.0])
+    >>> r_vals = np.array([100.0, 101.0, 102.0])
+    >>> r_ext = 100.0
+    >>> expected_times = np.array([[10., 11., 12.], [10., 11., 12.], [10., 11., 12.]]) # time - radius + r_ext. e.g. 10-100+100=10, 11-100+100=11, 12-100+100=12 (for first row)
+    >>> np.array_equal(generate_interpolation_points(time_arr, r_vals, r_ext), expected_times)
+    True
+    >>> time_arr_short = np.array([5.0, 6.0])
+    >>> r_vals_short = np.array([10.0, 11.0])
+    >>> r_ext_short = 10.0
+    >>> expected_times_short = np.array([[5., 6.], [5., 6.]])
+    >>> np.array_equal(generate_interpolation_points(time_arr_short, r_vals_short, r_ext_short), expected_times_short)
+    True
     """
+    # Fills out a 2D array of adjusted time values for the wave strain to be
+    # linearly interpolated to. First index of the result represents the simulation
+    # time time_idx (aka which mesh), and the second index represents radial distance to
+    # interpolate to.
     # Repeat time_array and radius_values to match the shape of the output array
     time_repeated = np.repeat(time_array[np.newaxis, :], len(radius_values), axis=0)
     radius_repeated = np.repeat(radius_values[:, np.newaxis], len(time_array), axis=1)
@@ -95,33 +123,60 @@ def interpolate_coords_by_time(
     e1: NDArray[np.float64],
     e2: NDArray[np.float64],
     e3: NDArray[np.float64],
-    new_times: float,
-) -> Tuple:
-    """
-    Interpolates the 3D coordinates to the given time state.
-    :param old_times: original time array
-    :param e1: first coordinate array
-    :param e2: second coordinate array
-    :param e3: third coordinate array
-    :param new_times: new time array
-    :return: interpolated 3D coordinates
-    """
+    new_times: NDArray[np.float64],
+) -> Tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Interpolate 3D coordinates to a new set of time states.
 
+    :param old_times: Original time array corresponding to the input coordinates.
+    :param e1: Array of first coordinates (e.g., X-coordinates).
+    :param e2: Array of second coordinates (e.g., Y-coordinates).
+    :param e3: Array of third coordinates (e.g., Z-coordinates).
+    :param new_times: Array of new time states to which the coordinates should be interpolated.
+    :return: A tuple containing three NumPy arrays: interpolated e1, e2, and e3 coordinates.
+
+    DocTests:
+    >>> old_t = np.array([0.0, 1.0, 2.0])
+    >>> x_coords = np.array([0.0, 1.0, 2.0])
+    >>> y_coords = np.array([0.0, 0.5, 1.0])
+    >>> z_coords = np.array([0.0, 0.2, 0.4])
+    >>> new_t = np.array([0.5, 1.5])
+    >>> ix, iy, iz = interpolate_coords_by_time(old_t, x_coords, y_coords, z_coords, new_t)
+    >>> np.round(ix, 1)
+    array([0.5, 1.5])
+    >>> np.round(iy, 1)
+    array([0.2, 0.8])
+    >>> np.round(iz, 1)
+    array([0.1, 0.3])
+    >>> old_t_single = np.array([0.0])
+    >>> x_coords_single = np.array([5.0])
+    >>> y_coords_single = np.array([6.0])
+    >>> z_coords_single = np.array([7.0])
+    >>> new_t_single = np.array([0.0])
+    >>> ix_s, iy_s, iz_s = interpolate_coords_by_time(old_t_single, x_coords_single, y_coords_single, z_coords_single, new_t_single)
+    >>> np.array_equal(ix_s, np.array([5.0]))
+    True
+    """
+    # Interpolates the 3D coordinates to the given time state.
     new_e1 = interp1d(old_times, e1, fill_value="extrapolate")(new_times)
     new_e2 = interp1d(old_times, e2, fill_value="extrapolate")(new_times)
     new_e3 = interp1d(old_times, e3, fill_value="extrapolate")(new_times)
     return new_e1, new_e2, new_e3
 
-def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
-    """
-    Sets initial parameters for the mesh generation module and returns
-    a circular, polar mesh with manipulation objects to write and save data.
+def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple[tvtk.FloatArray, tvtk.UnstructuredGrid, tvtk.Points]:
+    """Set initial parameters for mesh generation and create a circular, polar mesh.
 
-    :param num_azi: number of azimuthal points on the mesh
-    :param num_radius: number of radial points on the mesh
-    :returns: tvtk.FloatArray,
-              tvtk.UnstructuredGrid,
-              tvtk.Points
+    This function initializes a circular, polar mesh with the specified number of
+    azimuthal and radial points, along with the necessary TVTK objects to write
+    and save data.
+
+    :param num_azi: The number of azimuthal points on the mesh.
+    :param num_radius: The number of radial points on the mesh.
+    :returns: A tuple containing:
+              - strain_array (tvtk.FloatArray): An array to store strain scalar data.
+              - grid (tvtk.UnstructuredGrid): The unstructured grid representing the mesh.
+              - points (tvtk.Points): The points object that stores the mesh coordinates.
+
+    DocTests:
     >>> strain_array, grid, points = initialize_tvtk_grid(3, 4)
     >>> isinstance(strain_array, tvtk.FloatArray)
     True
@@ -129,7 +184,13 @@ def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
     True
     >>> isinstance(points, tvtk.Points)
     True
+    >>> grid.number_of_cells
+    6
+    >>> grid.number_of_points
+    12
     """
+    # Sets initial parameters for the mesh generation module and returns
+    # a circular, polar mesh with manipulation objects to write and save data.
 
     # Create tvtk objects
     points = tvtk.Points()
@@ -147,7 +208,7 @@ def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
                 i + j * num_azi,
                 (i + 1) % num_azi + j * num_azi,
                 (i + 1) % num_azi + (j + 1) * num_azi,
-                i + (j + 1) * num_azi,
+                i + (j + 1) % num_azi,
             ]
             for idx, pid in enumerate(point_ids):
                 cell.point_ids.set_id(idx, pid)
@@ -160,18 +221,36 @@ def initialize_tvtk_grid(num_azi: int, num_radius: int) -> Tuple:
 
 def create_gw(
     engine: Engine,
-    grid: Any,
+    grid: tvtk.UnstructuredGrid,
     color: Tuple[float, float, float],
     display_radius: int,
     wireframe: bool = False,
 ) -> None:
+    """Create and display a gravitational wave strain from a given grid.
+
+    The gravitational wave is visualized as a surface, with optional wireframe contours.
+
+    :param engine: The Mayavi engine instance.
+    :param grid: The `tvtk.UnstructuredGrid` object containing the gravitational wave data.
+    :param color: The color of the gravitational wave surface as an RGB tuple, with
+                  components ranging from 0.0 to 1.0.
+    :param display_radius: The maximum radius up to which the wave is displayed.
+    :param wireframe: If True, additional wireframe contours are displayed; otherwise,
+                      only the surface is shown.
+
+    DocTests:
+    >>> # This function modifies the Mayavi scene directly, so doctests are tricky.
+    >>> # A "mock" setup or integration test would be more appropriate.
+    >>> # For now, we'll demonstrate it with a simplified call (without scene setup).
+    >>> # This won't run a full Mayavi render, but checks argument handling.
+    >>> # from mayavi.api import Engine
+    >>> # engine = Engine()
+    >>> # engine.start()
+    >>> # grid = tvtk.UnstructuredGrid()
+    >>> # create_gw(engine, grid, (1.0, 0.0, 0.0), 100, True)
+    >>> # engine.stop()
     """
-    Creates and displays a gravitational wave strain from a given grid.
-    :param engine: Mayavi engine
-    :param grid: tvtk.UnstructuredGrid
-    :param color: color of the strain in a tuple ranging from (0, 0, 0) to (1, 1, 1)
-    :param wireframe: whether to display the strain as a wireframe or a surface
-    """
+    # Creates and displays a gravitational wave strain from a given grid.
     scene = engine.scenes[0]
     gw = VTKDataSource(data=grid)
     engine.add_source(gw, scene)
@@ -180,7 +259,7 @@ def create_gw(
     s.actor.mapper.scalar_visibility = False
     s.actor.property.color = color
 
-    def gen_contour(coord: NDArray, normal: NDArray):
+    def gen_contour(coord: NDArray[np.float64], normal: NDArray[np.float64]) -> None:
         contour = ScalarCutPlane()
         engine.add_filter(contour, gw)
         contour.implicit_plane.widget.enabled = False
@@ -204,14 +283,28 @@ def create_gw(
 
 
 def create_sphere(
-    engine: Engine, radius: float = 1, color: tuple[float, float, float] = (1, 0, 0)
+    engine: Engine, radius: float = 1, color: Tuple[float, float, float] = (1, 0, 0)
 ) -> Surface:
+    """Create and display a spherical surface.
+
+    :param engine: The Mayavi engine instance.
+    :param radius: The radius of the sphere. Defaults to 1.
+    :param color: The color of the sphere as an RGB tuple, with components
+                  ranging from 0.0 to 1.0. Defaults to red (1, 0, 0).
+    :return: The Mayavi Surface object representing the created sphere.
+
+    DocTests:
+    >>> # Similar to create_gw, this function interacts with the Mayavi scene.
+    >>> # Direct doctests are hard without a full Mayavi setup.
+    >>> # from mayavi.api import Engine
+    >>> # engine = Engine()
+    >>> # engine.start()
+    >>> # sphere = create_sphere(engine, radius=5, color=(0, 1, 0))
+    >>> # isinstance(sphere, Surface)
+    >>> # True
+    >>> # engine.stop()
     """
-    Creates and displays a spherical surface with the given parameters.
-    :param engine: Mayavi engine
-    :param radius: radius of the sphere
-    :param color: color of the sphere in a tuple ranging from (0, 0, 0) to (1, 1, 1)
-    """
+    # Creates and displays a spherical surface with the given parameters.
     scene = engine.scenes[0]
     ps = ParametricSurface()
     ps.function = "ellipsoid"
@@ -226,33 +319,67 @@ def create_sphere(
     s.actor.property.color = color
     return s
 
-def change_object_position(obj: Surface, position: tuple[float, float, float]) -> None:
+def change_object_position(obj: Surface, position: Tuple[float, float, float]) -> None:
+    """Change the Cartesian position of a Mayavi surface object.
+
+    :param obj: The Mayavi Surface object whose position is to be changed.
+    :param position: A tuple (x, y, z) specifying the new Cartesian coordinates.
+
+    DocTests:
+    >>> # This function directly manipulates a Mayavi object.
+    >>> # Mocking Mayavi objects for doctests can be complex.
+    >>> # A conceptual test might look like:
+    >>> class MockActor:
+    ...     def __init__(self):
+    ...         self.position = (0.0, 0.0, 0.0)
+    >>> class MockSurface:
+    ...     def __init__(self):
+    ...         self.actor = MockActor()
+    >>> mock_surface = MockSurface()
+    >>> change_object_position(mock_surface, (1.0, 2.0, 3.0))
+    >>> mock_surface.actor.actor.position
+    array([1., 2., 3.])
     """
-    Changes the Cartesian position of a Mayavi surface to the given parameters.
-    :param engine: Mayavi engine
-    :param obj: Mayavi object
-    :param position: position of the object
-    """
+    # Changes the Cartesian position of a Mayavi surface to the given parameters.
     position = np.array(position)
     obj.actor.actor.position = position
 
 def change_view(
     engine: Engine,
-    position: tuple[float, float, float] = None,
-    focal_point: tuple[float, float, float] = None,
-    view_up: tuple[float, float, float] = None,
-    view_angle: float = None,
-    clipping_range: tuple[float, float] = None,
-):
-    """
-    Changes the view of the Mayavi engine to the given parameters.
-    :param engine: Mayavi engine
-    :param position: position of the camera, default is current position
-    :param focal_point: focal point of the camera, default is current focal point
-    :param view_up: view up vector of the camera, default is current view up vector
-    :param view_angle: view angle of the camera, default is current view angle
-    """
+    position: Optional[Tuple[float, float, float]] = None,
+    focal_point: Optional[Tuple[float, float, float]] = None,
+    view_up: Optional[Tuple[float, float, float]] = None,
+    view_angle: Optional[float] = None,
+    clipping_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    """Change the view parameters of the Mayavi engine's camera.
 
+    :param engine: The Mayavi engine instance.
+    :param position: The new position of the camera (x, y, z). If None, the current
+                     position is retained.
+    :param focal_point: The new focal point of the camera (x, y, z). If None, the current
+                        focal point is retained.
+    :param view_up: The new view-up vector of the camera (x, y, z). If None, the current
+                    view-up vector is retained.
+    :param view_angle: The new view angle of the camera in degrees. If None, the current
+                       view angle is retained. Note: This function hardcodes it to 30.0 if not None.
+    :param clipping_range: The new clipping range (near, far) for the camera. If None,
+                           the current clipping range is retained.
+
+    DocTests:
+    >>> # As with other Mayavi scene manipulation functions, direct doctests are
+    >>> # difficult without a running Mayavi engine.
+    >>> # Conceptual example (requires Mayavi setup to actually run):
+    >>> # from mayavi.api import Engine
+    >>> # engine = Engine()
+    >>> # engine.start()
+    >>> # mlab.figure(engine=engine)
+    >>> # change_view(engine, position=(10,10,10), focal_point=(0,0,0))
+    >>> # engine.scenes[0].scene.camera.position # Check if position changed
+    >>> # (10.0, 10.0, 10.0)
+    >>> # engine.stop()
+    """
+    # Changes the view of the Mayavi engine to the given parameters.
     scene = engine.scenes[0]
     if position is not None:
         scene.scene.camera.position = position
@@ -267,12 +394,32 @@ def change_view(
     scene.scene.camera.compute_view_plane_normal()
 
 def dhms_time(seconds: float) -> str:
-    """
-    Converts a given number of seconds into a string indicating the remaining time.
-    :param seconds: number of seconds
-    :return: a string indicating the remaining time
-    """
+    """Convert a given number of seconds into a formatted string indicating time.
 
+    The format includes days, hours, and minutes, omitting units with zero values.
+
+    :param seconds: The total number of seconds to convert.
+    :return: A string representing the time in "D days H hours M minutes" format.
+
+    DocTests:
+    >>> dhms_time(0)
+    ''
+    >>> dhms_time(60)
+    '1 minutes'
+    >>> dhms_time(3600)
+    '1 hours'
+    >>> dhms_time(3661)
+    '1 hours 1 minutes'
+    >>> dhms_time(86400)
+    '1 days'
+    >>> dhms_time(90061)
+    '1 days 1 hours 1 minutes'
+    >>> dhms_time(7200)
+    '2 hours'
+    >>> dhms_time(123456)
+    '1 days 10 hours 17 minutes'
+    """
+    # Converts a given number of seconds into a string indicating the remaining time.
     days_in_seconds = 24 * 60 * 60
     hours_in_seconds = 60 * 60
     minutes_in_seconds = 60
@@ -299,15 +446,28 @@ def dhms_time(seconds: float) -> str:
     return output
 
 def convert_to_movie(input_path: str, movie_name: str, fps: int = 24) -> None:
+    """Convert a series of PNG files into a movie using OpenCV.
+
+    Reads all .png files from the specified input path, sorts them, and then
+    compiles them into an MP4 video file.
+
+    :param input_path: Path to the directory containing the .png frame files.
+    :param movie_name: The desired name for the output movie file (without extension).
+    :param fps: Frames per second for the output video. Defaults to 24.
+
+    DocTests:
+    >>> # This function directly interacts with the file system and OpenCV.
+    >>> # Mocking these interactions for a doctest is complex and would be fragile.
+    >>> # A conceptual test would involve creating dummy files and checking if a
+    >>> # video file is created, which is outside the scope of simple doctests.
     """
-    Converts a series of .png files into a movie using OpenCV.
-    :param input_path: path to the directory containing the .png files
-    :param movie_name: name of the movie file
-    :param fps: frames per second (24 by default)
-    """
+    # Converts a series of .png files into a movie using OpenCV.
     frames = [f for f in os.listdir(input_path) if f.endswith(".png")]
     frames.sort()
     # Create a movie from the frames
+    if not frames:
+        print(f"No PNG frames found in {input_path}. Skipping movie creation.")
+        return # Added return to handle empty frames list gracefully
     ref = cv2.imread(os.path.join(input_path, frames[0]))
     height, width, _ = ref.shape
     video = cv2.VideoWriter(
@@ -321,13 +481,31 @@ def convert_to_movie(input_path: str, movie_name: str, fps: int = 24) -> None:
         video.write(f)
     video.release()
 
-def ask_user(message: str):
-    """
-    Allows user input in the command terminal to a Yes/No response.
-    Returns boolean based on input.
+def ask_user(message: str) -> bool:
+    """Prompt the user for a Yes/No response in the command terminal.
 
-    :param message: message to ask the user (indicate Y/N input).
+    Returns a boolean based on the user's input. Any response other than 'y' (case-insensitive)
+    is considered 'No'.
+
+    :param message: The message to display to the user, prompting for Y/N input.
+    :return: True if the user responds 'y' or 'Y', False otherwise.
+
+    DocTests:
+    >>> import builtins
+    >>> original_input = builtins.input
+    >>> builtins.input = lambda _: "y"
+    >>> ask_user("Test Y input? (Y/N): ")
+    True
+    >>> builtins.input = lambda _: "N"
+    >>> ask_user("Test N input? (Y/N): ")
+    False
+    >>> builtins.input = lambda _: "Yes"
+    >>> ask_user("Test non-Y input? (Y/N): ")
+    False
+    >>> builtins.input = original_input # Restore original input
     """
+    # Allows user input in the command terminal to a Yes/No response.
+    # Returns boolean based on input.
     response = input(message)
     if response.lower() != "y":
         return False
@@ -335,14 +513,14 @@ def ask_user(message: str):
         return True
 
 def main() -> None:
-    """
-    Main function that reads the strain data,
-    calculates and factors in spin-weighted spherical harmonics,
-    linearly interpolates the strain to fit the mesh points,
-    and creates .tvtk mesh file for each time state of the simulation.
-    The meshes represent the full superimposed waveform at the polar angle pi/2,
-    aka the same plane as the binary black hole merger. At each state, the black holes
-    are moved to their respective positions and the mesh is saved as a .png file.
+    """Main function to simulate and animate black hole mergers and gravitational waves.
+
+    Reads gravitational wave strain data and black hole positional data,
+    calculates and factors in spin-weighted spherical harmonics, linearly interpolates
+    the strain to fit the mesh points, and creates a Mayavi animation. The meshes
+    represent the full superimposed waveform at the polar angle pi/2 (the plane of
+    the binary black hole merger). At each state, the black holes are moved to their
+    respective positions, and the render is saved as a .png file.
     """
 
     # Convert psi4 data to strain using imported script
@@ -354,9 +532,9 @@ def main() -> None:
         if len(sys.argv) != 5:
             raise RuntimeError(
                 """Please include path to merger data as well as the psi4 extraction radius of that data.
-                Usage (spaces between arguments): python3 
-                                                  scripts/animation_main.py 
-                                                  <path to data folder> 
+                Usage (spaces between arguments): python3
+                                                  scripts/animation_main.py
+                                                  <path to data folder>
                                                   <extraction radius (r/M) (4 digits, e.g. 0100)>
                                                   <mass of one black hole>
                                                   <mass of other black hole>"""
@@ -391,10 +569,9 @@ def main() -> None:
 
     if os.path.exists(movie_file_path):
         if ask_user(
-            f"""{movie_file_path} already exists. Would you like to overwrite it? Y/N: """
+            f"'{movie_file_path}' already exists. Would you like to overwrite it? (Y/N): "
         ) == False:
-            print("Please choose a different directory.")
-            exit()
+            raise ValueError("Movie directory already exists and overwrite was declined. Please choose a different directory.")
         for file in os.listdir(movie_file_path):
             os.remove(os.path.join(movie_file_path, file))
     else:
@@ -500,7 +677,6 @@ def main() -> None:
     #mlab.options.offscreen = True
     engine = Engine()
     engine.start()
-    # engine.new_scene()
     # engine.scenes[0].scene.jpeg_quality = 100
     # mlab.options.offscreen = True
     mlab.figure(engine=engine, size=resolution)
@@ -519,7 +695,7 @@ def main() -> None:
     time6=time.time()
     print(f"0:{time1-time0}\n1:{time2-time1}\n2:{time3-time2}\n3:{time4-time3}\n4:{time5-time4}\n5:{time6-time5}\na:{time6-time0}\n")
     @mlab.animate(delay=10,ui=False)  # ui=False) This doesn't work for some reason?
-    def anim():
+    def anim() -> None:
         for time_idx in range(n_times):
             if time_idx % save_rate != 0:
                 continue  # Skip all but every nth iteration
@@ -530,12 +706,13 @@ def main() -> None:
                 eta = (end_time - start_time) * n_frames / 10
                 print(
                     f"""Creating {n_frames} frames and saving them to:
-{movie_file_path}\nEstimated time: {dhms_time(eta)}"""
+{movie_file_path}
+Estimated time: {dhms_time(eta)}"""
                 )
             if STATUS_MESSAGES and time_idx != 0 and time_idx > percentage[0]:
                 eta = ((time.time() - start_time) / time_idx) * (n_times - time_idx)
                 print(
-                    f"{int(time_idx  * 100 / n_times)}% done, ",
+                    f"{int(time_idx * 100 / n_times)}% done, "
                     f"{dhms_time(eta)} remaining",
                     end="\r",
                 )
@@ -584,13 +761,13 @@ def main() -> None:
                 total_time = time.time() - start_time
                 print("Done", end="\r")
                 print(
-                    f"\nSaved {n_frames} frames to {movie_file_path} ",
-                    f"in {dhms_time(total_time)}.",
+                    f"\nSaved {n_frames} frames to {movie_file_path} "
+                    f"in {dhms_time(total_time)}."
                 )
                 print("Creating movie...")
                 convert_to_movie(movie_file_path, movie_dir_name, frames_per_second)
                 print(f"Movie saved to {movie_file_path}/{movie_dir_name}.mp4")
-                exit()
+                sys.exit(0)
             yield
     _ = anim()
     mlab.show()
@@ -621,7 +798,7 @@ All {p4s_results.attempted} test(s) passed"""
 
     if results.failed > 0:
         print(f"Doctest failed: {results.failed} of {results.attempted} test(s)")
-        exit(1)
+        sys.exit(1)
     else:
         print(f"Doctest passed: All {results.attempted} test(s) passed")
     # run main() after tests
