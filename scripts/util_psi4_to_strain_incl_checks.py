@@ -7,8 +7,7 @@ data, extracting relevant information like the phase and amplitude, and performi
 analysis like FFT and quadratic fitting to extract physical properties from the waveforms.
 It's designed to work with ASCII files containing gravitational wave data from simulations.
 
-Author: Zachariah B. Etienne
-        zachetie **at** gmail **dot* com
+Author: Seth Winchell
 """
 import sys
 import os
