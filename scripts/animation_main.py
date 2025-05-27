@@ -5,8 +5,7 @@ apply spin-weighted spherical harmonics to the data, and create a Mayavi animati
 of the black holes and their gravitational waves. At each state, move the black holes
 to their respective positions and save the render as a .png file.
 
-Author: Zachariah B. Etienne
-        zachetie **at** gmail **dot* com
+Authors: Joey Perko, NLedge, Seth Winchell, Tyndale Stutzman
 """
 
 import os
