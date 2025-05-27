@@ -3,8 +3,7 @@
 Allow the user to visualize specific modes or the superimposed waveform
 by providing system arguments for data directory, input type, and desired modes.
 
-Author: Zachariah B. Etienne
-        zachetie **at** gmail **dot* com
+Author: Seth Winchell
 """
 
 import os
