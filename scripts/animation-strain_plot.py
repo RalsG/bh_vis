@@ -5,8 +5,7 @@ as a time-evolving plot. The script reads gravitational wave strain data,
 processes it, and creates an animated plot that can be saved as a video file
 or displayed directly.
 
-Author: Zachariah B. Etienne
-        zachetie **at** gmail **dot* com
+Author: Tyndale Stutzman
 """
 
 import os
