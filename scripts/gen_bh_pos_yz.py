@@ -5,7 +5,8 @@ velocity information. Filter out comment lines, then convert the data to a
 NumPy array and sort it by the first column (time). Finally, print the
 processed NumPy array to the console.
 
-Author: Dalton Moone
+Author: Zachariah B. Etienne
+        zachetie **at** gmail **dot* com
 """
 import os
 import numpy as np
