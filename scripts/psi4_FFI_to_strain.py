@@ -51,10 +51,10 @@ def psi4_ffi_to_strain(
     :raises OSError: If there is an error reading the PSI4 data or writing strain data.
     :raises ValueError: If the lengths of the time and data arrays are not equal during data processing.
     """
-    ell_min = 2  # if not 2, also adjust calls to read_psi4_dir(), modes_index(), and index_modes()
+    ell_min = 1  # if not 2, also adjust calls to read_psi4_dir(), modes_index(), and index_modes()
 
     try:
-        time_arr, psi4_modes_data = read_psi4_dir(data_dir, ell_max)
+        time_arr, psi4_modes_data = read_psi4_dir(data_dir, ell_max, ell_min)
     except OSError as e: # Catch OSError as read_psi4_dir can raise FileNotFoundError
         raise OSError(f"Error reading PSI4 data: {e}") from e
 
