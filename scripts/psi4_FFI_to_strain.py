@@ -10,7 +10,8 @@ Save the phase and amplitude, the second integral, and the twice integrated-twic
 data to text files. The primary function returns the second integral data as a NumPy array
 with the various ell-values.
 
-Authors: NLedge, Seth Winchell
+Author: Zachariah B. Etienne
+        zachetie **at** gmail **dot* com
 """
 
 import sys
