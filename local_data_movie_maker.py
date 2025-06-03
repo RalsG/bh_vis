@@ -11,13 +11,13 @@ import inspect
 import sys
 
 # --- Configuration Parameters ---
-input_data_dir = "/home/guest/ralston_scripts/bh_vis/new_sxs_work/strain_data"
+input_data_dir = "<strain input path>"
 extraction_radius_str = "100"
 # Define the folder where the .gp (horizon) files are stored
-horizon_folder = "/home/guest/GW150914_baikalvacuum" # change if separate locations
+horizon_folder = "<horizon input path>" # change if separate locations
 
 data_name = "Einstein_toolkit_combined_data"
-OUTPUT_MOVIE_FILENAME = f"{data_name}_hplus_ah_surfaces_movie_zoomed.mp4"
+OUTPUT_MOVIE_FILENAME = f"{data_name}_hplus_ah_surfaces_movie.mp4"
 NUM_FRAMES = 240
 FPS = 24
 
