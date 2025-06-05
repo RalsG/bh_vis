@@ -4,7 +4,7 @@ from sxs.waveforms import WaveformModes # For type hints
 import spherical
 import quaternionic
 from mayavi import mlab
-from scipy.special import sph_harm
+import vtk
 import imageio.v2 as imageio # clarification 
 import os
 import time
@@ -12,25 +12,207 @@ import inspect
 import sys
 
 # --- Configuration Parameters ---
-SXS_ID = "SXS:BBH:2078"
-OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_hplus_surface_movie_test.mp4"
-NUM_FRAMES = 600
+SXS_ID = "SXS:BBH:0147"
+OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_strain_surface_movie.mp4"
+NUM_FRAMES = 400
 FPS = 24
+spin_arrow_size = 5
 
 # GW Surface Visualization Parameters
 N_R_GW = 80
 N_PHI_GW = 160
-MIN_R_GW = 13.0
+MIN_R_GW = 10.0
 MAX_R_GW = 200.0
-AMPLITUDE_SCALE = 60.0 # Factor to scale h+ for z-displacement (TUNE THIS!)
+AMPLITUDE_SCALE = 80.0 # Factor to scale h+ for z-displacement (TUNE THIS!)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 
-CAMERA_INITIAL_DISTANCE = MAX_R_GW * 0.9
+CAMERA_INITIAL_DISTANCE = MAX_R_GW * 0.4
 CAMERA_FINAL_DISTANCE = MAX_R_GW * 1.8
 CAMERA_ZOOM_START_TIME_FRAC = 0.3
 CAMERA_ZOOM_END_TIME_FRAC = 0.7 # Extended zoom duration
 
 # --- Helper Functions ---
+def update_or_create_progress_circle(scene, current_frame, total_frames,
+                                     circle_actors=None,
+                                     diameter_pixels=20,
+                                     center_norm_coords=(0.05, 0.95), # (x_center, y_center) from bottom-left
+                                     color=(0.9, 0.9, 0.9),
+                                     outline_thickness=2):
+    """
+    Creates or updates a clockwise progress circle overlay in a Mayavi scene.
+    This version assumes mlab.clf() removes actors from the renderer,
+    so it re-adds them each frame if they exist.
+    It also incorporates robust window size detection.
+    """
+    if scene is None:
+        figure = mlab.gcf()
+        if figure is None:
+            print("Error: No Mayavi scene/figure found for progress circle.")
+            return None
+        scene = figure.scene
+    
+    renderer = scene.renderer
+    render_window = scene.render_window
+    if renderer is None: # Added check for renderer
+        print("Error: Scene has no renderer for progress circle.")
+        return None
+    
+    # Robust window size determination (combining ideas from Expert 1 and 2)
+    window_width, window_height = 0, 0
+    valid_size_obtained = False
+
+    if render_window:
+        window_width, window_height = render_window.size
+        if window_width > 0 and window_height > 0:
+            valid_size_obtained = True
+
+    if not valid_size_obtained:
+        # Try scene.parent.size (often the figure size, from Expert 1)
+        if hasattr(scene, 'parent') and hasattr(scene.parent, 'size') and \
+           scene.parent.size[0] > 0 and scene.parent.size[1] > 0:
+            window_width, window_height = scene.parent.size
+            valid_size_obtained = True
+        else: # Try renderer's viewport size (from original and Expert 1 & 2)
+            viewport_size = renderer.GetSize()
+            if viewport_size[0] > 0 and viewport_size[1] > 0:
+                window_width, window_height = viewport_size
+                valid_size_obtained = True
+
+    # Calculate normalized dimensions for the circle
+    if valid_size_obtained:
+        norm_diameter_w = float(diameter_pixels) / window_width
+        norm_diameter_h = float(diameter_pixels) / window_height
+    else: # Fallback if size is still unknown (e.g., offscreen, pre-first-render)
+        print(f"Warning: Window/Renderer size is {window_width}x{window_height} for progress circle. "
+              f"Using fallback based on diameter_pixels and assumed 800px dimension.")
+        # Fallback inspired by Expert 1: pixel-based using a default assumed dimension
+        default_dimension_for_pixel_calc = 800.0
+        norm_diameter_w = float(diameter_pixels) / default_dimension_for_pixel_calc
+        norm_diameter_h = float(diameter_pixels) / default_dimension_for_pixel_calc
+        # Store 0,0 to ensure resize logic triggers on next frame if actual size becomes known
+        window_width, window_height = 0,0
+
+    actor_pos_x = center_norm_coords[0] - norm_diameter_w / 2.0
+    actor_pos_y = center_norm_coords[1] - norm_diameter_h / 2.0
+
+    if circle_actors is None:
+        circle_actors = {}
+
+        # Outline Actor
+        outline_source = vtk.vtkRegularPolygonSource()
+        outline_source.SetNumberOfSides(60)
+        outline_source.SetRadius(0.07)
+        outline_source.SetCenter(0, 0, 0)
+        outline_source.GeneratePolygonOff()
+        outline_source.GeneratePolylineOn()
+        # outline_source.Update() # Mapper will call it
+
+        outline_mapper = vtk.vtkPolyDataMapper2D()
+        outline_mapper.SetInputConnection(outline_source.GetOutputPort())
+        transform_coords_outline = vtk.vtkCoordinate()
+        transform_coords_outline.SetCoordinateSystemToNormalizedViewport()
+        outline_mapper.SetTransformCoordinate(transform_coords_outline)
+
+        outline_actor = vtk.vtkActor2D()
+        outline_actor.SetMapper(outline_mapper)
+        outline_actor.GetProperty().SetColor(color)
+        outline_actor.GetProperty().SetLineWidth(outline_thickness)
+        outline_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        outline_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
+        outline_actor.SetWidth(norm_diameter_w)
+        outline_actor.SetHeight(norm_diameter_h)
+        
+        renderer.add_actor(outline_actor)
+        circle_actors['outline_source'] = outline_source
+        circle_actors['outline_actor'] = outline_actor
+
+        # Fill Actor
+        fill_source = vtk.vtkSectorSource()
+        fill_source.SetInnerRadius(0.0)
+        fill_source.SetOuterRadius(0.07)
+        fill_source.SetCircumferentialResolution(60)
+
+        fill_mapper = vtk.vtkPolyDataMapper2D()
+        fill_mapper.SetInputConnection(fill_source.GetOutputPort())
+        transform_coords_fill = vtk.vtkCoordinate()
+        transform_coords_fill.SetCoordinateSystemToNormalizedViewport()
+        fill_mapper.SetTransformCoordinate(transform_coords_fill)
+
+        fill_actor = vtk.vtkActor2D()
+        fill_actor.SetMapper(fill_mapper)
+        fill_actor.GetProperty().SetColor(color)
+        fill_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        fill_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
+        fill_actor.SetWidth(norm_diameter_w)
+        fill_actor.SetHeight(norm_diameter_h)
+
+        renderer.add_actor(fill_actor)
+        circle_actors['fill_source'] = fill_source
+        circle_actors['fill_actor'] = fill_actor
+        
+        circle_actors['last_window_size'] = (window_width, window_height) # Could be (0,0)
+        circle_actors['last_center_norm_coords'] = center_norm_coords
+        circle_actors['last_diameter_pixels'] = diameter_pixels
+
+    else: # circle_actors dictionary exists, VTK objects are already created.
+        outline_actor = circle_actors['outline_actor']
+        fill_actor = circle_actors['fill_actor']
+        fill_source = circle_actors['fill_source']
+
+        # Update properties that might change frame-to-frame (inspired by Expert 3)
+        outline_actor.GetProperty().SetColor(color)
+        outline_actor.GetProperty().SetLineWidth(outline_thickness)
+        fill_actor.GetProperty().SetColor(color)
+
+        # IMPORTANT: Re-add actors to the renderer, as mlab.clf() is assumed to remove them. (Expert 1's core logic)
+        # To be robust, remove first in case of any weird state, then add.
+        renderer.remove_actor(outline_actor) 
+        renderer.add_actor(outline_actor)
+        renderer.remove_actor(fill_actor)
+        renderer.add_actor(fill_actor)
+        
+        # Check if window size or other geometry-defining parameters changed
+        current_params_window_size = (window_width, window_height) # The size used for calculations in *this* call.
+        
+        if current_params_window_size != circle_actors.get('last_window_size') or \
+           center_norm_coords != circle_actors.get('last_center_norm_coords') or \
+           diameter_pixels != circle_actors.get('last_diameter_pixels'):
+
+            # Update actor position and size properties only if current_params_window_size reflects a valid size
+            # The variables actor_pos_x, actor_pos_y, norm_diameter_w, norm_diameter_h reflect current params.
+            if window_width > 0 and window_height > 0: # Ensure we are updating with valid dimensions
+                outline_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
+                outline_actor.SetWidth(norm_diameter_w)
+                outline_actor.SetHeight(norm_diameter_h)
+
+                fill_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
+                fill_actor.SetWidth(norm_diameter_w)
+                fill_actor.SetHeight(norm_diameter_h)
+                
+                circle_actors['last_window_size'] = current_params_window_size
+                circle_actors['last_center_norm_coords'] = center_norm_coords
+                circle_actors['last_diameter_pixels'] = diameter_pixels
+
+    # Update progress display
+    if total_frames <= 0: 
+        progress = 0.0
+    else: 
+        progress = min(1.0, max(0.0, float(current_frame + 1) / total_frames)) 
+
+    if progress == 0.0:
+        circle_actors['fill_actor'].SetVisibility(0)
+    elif progress >= 0.9999: # Use a threshold for "full" to handle float precision
+        circle_actors['fill_actor'].SetVisibility(1)
+        fill_source.SetStartAngle(90.0)
+        fill_source.SetEndAngle(90.0 + 359.99)
+    else:
+        circle_actors['fill_actor'].SetVisibility(1)
+        sweep_angle_deg = progress * 360.0
+        fill_source.SetStartAngle(450.0 - sweep_angle_deg)
+        fill_source.SetEndAngle(450.0)
+    
+    fill_source.Update() # Crucial to update the vtkSectorSource geometry
+    return circle_actors
 
 # load_simulation_data remains the same
 def load_simulation_data(sxs_id_str):
@@ -46,19 +228,16 @@ def load_simulation_data(sxs_id_str):
     horizons_data = getattr(simulation, 'horizons', None)
     if horizons_data is not None: print("Horizons data loaded.")
     else: print(f"Warning: horizons not found or empty for simulation {sxs_id_str}.")
-    print(strain_modes)
     return strain_modes, horizons_data
 
 
 def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
     # --- Initial Data Extraction and Interpolation ---
-    # A, B, C are guaranteed to exist and be non-None.
     # If .interpolate() fails (e.g., time_vals outside original range AND
     # the TimeSeries.interpolate doesn't handle fill_value/bounds_error itself
     # in a way that produces NaNs), this could still be an issue.
     # Let's assume TimeSeries.interpolate will return data aligned with time_vals,
     # possibly with NaNs if interpolation is outside original range and it's configured to do so.
-
 
     # For coordinates (expected shape of .data: (len(time_vals), 3))
     A_coords_ts_at_times = horizons_obj.A.coord_center_inertial.interpolate(time_vals)
@@ -70,6 +249,17 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
     B_mass_ts_at_times = horizons_obj.B.areal_mass.interpolate(time_vals)
     C_mass_ts_at_times = horizons_obj.C.areal_mass.interpolate(time_vals)
 
+    # Pull spins (as Cartesian vectors) and spin magnitudes for norming vectors to radius
+    A_chi_at_times = horizons_obj.A.chi_inertial.interpolate(time_vals)
+    B_chi_at_times = horizons_obj.B.chi_inertial.interpolate(time_vals)
+    C_chi_at_times = horizons_obj.C.chi_inertial.interpolate(time_vals)
+    
+    # chi_inertial_mag is *supposed* to be a TimeSeries, but isn't for all the simulations I've pulled
+    # so we just use NumPy's interpolator. Also the time (t) attribute should be the same across A and B, not sure about C
+    A_chi_mag_at_times = np.interp(time_vals, horizons_obj.A.time, horizons_obj.A.chi_inertial_mag)
+    B_chi_mag_at_times = np.interp(time_vals, horizons_obj.B.time, horizons_obj.B.chi_inertial_mag)
+    C_chi_mag_at_times = np.interp(time_vals, horizons_obj.C.time, horizons_obj.C.chi_inertial_mag)
+
     # Extract NumPy data arrays from the TimeSeries objects
     A_coords_data = np.asarray(A_coords_ts_at_times.data)
     B_coords_data = np.asarray(B_coords_ts_at_times.data)
@@ -78,7 +268,33 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
     A_rad_data = 2 * np.asarray(A_mass_ts_at_times.data)
     B_rad_data = 2 * np.asarray(B_mass_ts_at_times.data)
     C_rad_data = 2 * np.asarray(C_mass_ts_at_times.data)
-    
+
+    A_chi_data = np.asarray(A_chi_at_times.data)
+    B_chi_data = np.asarray(B_chi_at_times.data)
+    C_chi_data = np.asarray(C_chi_at_times.data)
+
+    A_chi_mag_data = np.asarray(A_chi_mag_at_times.data)
+    B_chi_mag_data = np.asarray(B_chi_mag_at_times.data)
+    C_chi_mag_data = np.asarray(C_chi_mag_at_times.data)
+
+    # Use spin components, radii, and center coords of the BHs
+    # to make the spin vectors start at the horizon of each BH in the direction of the spin
+    # There had to be a better way but figuring out a loop was gonna take as long as hardcoding :|
+    A_vec_pos_t = [A_coords_data[:, 0] + A_rad_data * (A_chi_data[:, 0]/A_chi_mag_data),
+                   A_coords_data[:, 1] + A_rad_data * (A_chi_data[:, 1]/A_chi_mag_data),
+                   A_coords_data[:, 2] + A_rad_data * (A_chi_data[:, 2]/A_chi_mag_data)]
+    B_vec_pos_t = [B_coords_data[:, 0] + B_rad_data * (B_chi_data[:, 0]/B_chi_mag_data),
+                   B_coords_data[:, 1] + B_rad_data * (B_chi_data[:, 1]/B_chi_mag_data),
+                   B_coords_data[:, 2] + B_rad_data * (B_chi_data[:, 2]/B_chi_mag_data)]
+    C_vec_pos_t = [C_coords_data[:, 0] + C_rad_data * (C_chi_data[:, 0]/C_chi_mag_data),
+                   C_coords_data[:, 1] + C_rad_data * (C_chi_data[:, 1]/C_chi_mag_data),
+                   C_coords_data[:, 2] + C_rad_data * (C_chi_data[:, 2]/C_chi_mag_data)]
+
+    chi_arrays_to_plot = [np.asarray([*A_vec_pos_t, A_chi_data[:, 0], A_chi_data[:, 1], A_chi_data[:, 2]]),
+                          np.asarray([*B_vec_pos_t, B_chi_data[:, 0], B_chi_data[:, 1], B_chi_data[:, 2]]),
+                          np.asarray([*C_vec_pos_t, C_chi_data[:, 0], C_chi_data[:, 1], C_chi_data[:, 2]])
+                          ]
+
     all_coords_over_time = [A_coords_data, B_coords_data, C_coords_data]
     all_radii_over_time = [A_rad_data, B_rad_data, C_rad_data]
 
@@ -108,7 +324,7 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
     # --- Loop through time and generate sphere surfaces ---
     for t_idx in range(len(time_vals)):
         for i in range(3): # For BH A, B, C
-            current_center = all_coords_over_time[i][t_idx] # Should be [cx, cy, cz] for this time
+            current_center = all_coords_over_time[i][t_idx]  # Should be [cx, cy, cz] for this time
             current_radius = all_radii_over_time[i][t_idx]  # Should be scalar radius for this time
 
             # Handle cases where data might be NaN (e.g., interpolation failure, horizon not existing)
@@ -129,13 +345,7 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
 
             surfaces_along_time[i].append((x_surface, y_surface, z_surface))
             
-    return surfaces_along_time
-
-
-
-    
-
-
+    return surfaces_along_time, chi_arrays_to_plot
     
 
 def reconstruct_hplus_on_xy_plane_at_time_t(
@@ -201,17 +411,21 @@ def reconstruct_hplus_on_xy_plane_at_time_t(
 def create_merger_movie():
     script_init_time = time.time()
     strain_modes_sxs, horizons_data = load_simulation_data(SXS_ID)
+    data_loaded_time = time.time()
+    print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
 
-    sxs_times_all = strain_modes_sxs.t
     peak_strain_time = strain_modes_sxs.max_norm_time()
-    anim_start_time = peak_strain_time - 500.0 
-    anim_end_time = peak_strain_time + 100.0
-    anim_start_time = sxs_times_all[0] + 250 # max(anim_start_time, sxs_times_all[0])
-    anim_end_time = sxs_times_all[-1] # min(anim_end_time, sxs_times_all[-1])
+    sim_start_time = strain_modes_sxs.t[0]
+    sim_end_time = strain_modes_sxs.t[-1]
+    sim_total_time = sim_end_time - sim_start_time
+    anim_start_time = 0.4 * sim_total_time + sim_start_time
+    anim_end_time = 0.82 * sim_total_time + sim_start_time
+    anim_start_time = max(anim_start_time, sim_start_time)
+    anim_end_time = min(anim_end_time, sim_end_time)
     anim_lab_times = np.linspace(
         anim_start_time,
         anim_end_time,
-        NUM_FRAMES, dtype=int, endpoint=True
+        NUM_FRAMES, endpoint=True
     )
 
     print(f"Animation time: {anim_lab_times[0]:.2f}M to {anim_lab_times[-1]:.2f}M over {len(anim_lab_times)} frames.")
@@ -230,22 +444,25 @@ def create_merger_movie():
     mlab.figure(size=(1280, 1024), bgcolor=(0.3, 0.3, 0.3))
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
-
-    bh_surfs = get_bh_mesh_data(horizons_data, anim_lab_times)
-
-
-
+    bh_surfs, spin_vectors = get_bh_mesh_data(horizons_data, anim_lab_times)
 
     frame_files = []
     frames_dir_path = "frames" # Changed directory name as requested
     os.makedirs(frames_dir_path, exist_ok=True)
 
-
-
-
     total_physical_anim_time = anim_lab_times[-1] - anim_lab_times[0]
     if total_physical_anim_time == 0: total_physical_anim_time = 1.0 # Avoid division by zero
 
+    progress_circle_actors = None 
+    # Parameters for the progress circle (can be defined once if static)
+    circle_display_params = {
+        "diameter_pixels": 60,
+        "center_norm_coords": (0.1, 0.95), 
+        "color": (0.95, 0.85, 0.95), # Light purple
+        "outline_thickness": 2
+    }
+
+    print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
     for i_frame, current_lab_time in enumerate(anim_lab_times):
         frame_render_start_time = time.time()
@@ -256,10 +473,15 @@ def create_merger_movie():
         )
 
         mlab.clf()
+        current_scene = mlab.gcf().scene 
+        if not current_scene or not current_scene.renderer:
+            print(f"Error: Could not get valid Mayavi scene/renderer for frame {i_frame}. Skipping.")
+            continue
+
         # plot GW surface
         mlab.mesh(X_GW_SURF, Y_GW_SURF, z_gw_frame,
                         color=GW_SURFACE_COLOR,
-                        representation='wireframe',
+                        # representation='wireframe',
                         name="GW h+ Surface",
                         opacity=0.75,
                         )
@@ -268,15 +490,15 @@ def create_merger_movie():
         
         if current_lab_time < common_horizon_start:
             # plot BH1
-            mlab.mesh(bh_surfs[0][i_frame][0], bh_surfs[0][i_frame][1], bh_surfs[0][i_frame][2], opacity=0.9, color=(0, 0, 0))
-            # blot BH2
-            mlab.mesh(bh_surfs[1][i_frame][0], bh_surfs[1][i_frame][1], bh_surfs[1][i_frame][2], opacity=0.9, color=(0, 0, 0))
+            mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0))
+            mlab.quiver3d(*spin_vectors[0][:, i_frame], color=(0.5, 0.5, 0.5), line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size)
+            # plot BH2
+            mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0))
+            mlab.quiver3d(*spin_vectors[1][:, i_frame], color=(0.5, 0.5, 0.5), line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size)
         else:
-            mlab.mesh(bh_surfs[2][i_frame][0], bh_surfs[2][i_frame][1], bh_surfs[2][i_frame][2], opacity=0.65, color=(0, 0, 0))
-
-
-
-
+            # plot merged BH
+            mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0))
+            mlab.quiver3d(*spin_vectors[2][:, i_frame], color=(0.5, 0.5, 0.5), line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size)
         
         current_anim_frac = (current_lab_time - anim_lab_times[0]) / total_physical_anim_time if total_physical_anim_time > 0 else 0
         if current_anim_frac < CAMERA_ZOOM_START_TIME_FRAC: cam_dist = CAMERA_INITIAL_DISTANCE
@@ -287,9 +509,15 @@ def create_merger_movie():
             cam_dist = CAMERA_INITIAL_DISTANCE + (CAMERA_FINAL_DISTANCE - CAMERA_INITIAL_DISTANCE) * progress
         
         mlab.view(azimuth=30 + i_frame*0.15, elevation=60, distance=cam_dist, focalpoint=(0,0,0))
-        mlab.text(0.02, 0.92, f"Time: {current_lab_time:.1f} M", width=0.25)
+        # <<<< PROGRESS CIRCLE UPDATE >>>>
+        progress_circle_actors = update_or_create_progress_circle(
+           scene=current_scene,
+           current_frame=i_frame, 
+           total_frames=NUM_FRAMES, 
+           circle_actors=progress_circle_actors,
+           **circle_display_params # Pass display parameters
+        )
         
-        mlab.orientation_axes()
         frame_filename = f"{frames_dir_path}/frame_{i_frame:04d}.png"
 
         mlab.savefig(frame_filename)
