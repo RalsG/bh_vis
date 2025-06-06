@@ -5,31 +5,35 @@ import spherical
 import quaternionic
 from mayavi import mlab
 import vtk
-import imageio.v2 as imageio # clarification 
+import imageio.v2 as imageio # clarification
+import cv2
 import os
 import time
 import inspect
 import sys
 
 # --- Configuration Parameters ---
-SXS_ID = "SXS:BBH:0147"
-OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_strain_surface_movie.mp4"
+SXS_ID = "SXS:BBH:0149"
+OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_PiP_movie.mp4"
+auto_loop_bool = False # option to make many movies
+sxs_idx_start = 150
+loop_size = 10
+
 NUM_FRAMES = 400
 FPS = 24
-spin_arrow_size = 5
 
 # GW Surface Visualization Parameters
-N_R_GW = 80
-N_PHI_GW = 160
+MAX_R_STEP = 60 # In units of M for the adaptive grid sampling
+N_PHI_GW = 240
 MIN_R_GW = 10.0
-MAX_R_GW = 200.0
-AMPLITUDE_SCALE = 80.0 # Factor to scale h+ for z-displacement (TUNE THIS!)
+MAX_R_GW = 800.0
+AMPLITUDE_SCALE = 0.45 * MAX_R_GW # Factor to scale h+ for z-displacement (TUNE THIS!)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 
-CAMERA_INITIAL_DISTANCE = MAX_R_GW * 0.4
-CAMERA_FINAL_DISTANCE = MAX_R_GW * 1.8
-CAMERA_ZOOM_START_TIME_FRAC = 0.3
-CAMERA_ZOOM_END_TIME_FRAC = 0.7 # Extended zoom duration
+PIP_CAMERA_DISTANCE = MIN_R_GW * 2.2
+MAIN_CAMERA_DISTANCE = MAX_R_GW * 1.8
+PIP_SCALE = 3.5 # This is the ratio of main scene to PiP
+antial_bool = False
 
 # --- Helper Functions ---
 def update_or_create_progress_circle(scene, current_frame, total_frames,
@@ -231,7 +235,7 @@ def load_simulation_data(sxs_id_str):
     return strain_modes, horizons_data
 
 
-def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
+def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20):
     # --- Initial Data Extraction and Interpolation ---
     # If .interpolate() fails (e.g., time_vals outside original range AND
     # the TimeSeries.interpolate doesn't handle fill_value/bounds_error itself
@@ -256,9 +260,9 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
     
     # chi_inertial_mag is *supposed* to be a TimeSeries, but isn't for all the simulations I've pulled
     # so we just use NumPy's interpolator. Also the time (t) attribute should be the same across A and B, not sure about C
-    A_chi_mag_at_times = np.interp(time_vals, horizons_obj.A.time, horizons_obj.A.chi_inertial_mag)
-    B_chi_mag_at_times = np.interp(time_vals, horizons_obj.B.time, horizons_obj.B.chi_inertial_mag)
-    C_chi_mag_at_times = np.interp(time_vals, horizons_obj.C.time, horizons_obj.C.chi_inertial_mag)
+    A_chi_mag_data = np.interp(time_vals, horizons_obj.A.time, horizons_obj.A.chi_inertial_mag)
+    B_chi_mag_data = np.interp(time_vals, horizons_obj.B.time, horizons_obj.B.chi_inertial_mag)
+    C_chi_mag_data = np.interp(time_vals, horizons_obj.C.time, horizons_obj.C.chi_inertial_mag)
 
     # Extract NumPy data arrays from the TimeSeries objects
     A_coords_data = np.asarray(A_coords_ts_at_times.data)
@@ -272,10 +276,6 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
     A_chi_data = np.asarray(A_chi_at_times.data)
     B_chi_data = np.asarray(B_chi_at_times.data)
     C_chi_data = np.asarray(C_chi_at_times.data)
-
-    A_chi_mag_data = np.asarray(A_chi_mag_at_times.data)
-    B_chi_mag_data = np.asarray(B_chi_mag_at_times.data)
-    C_chi_mag_data = np.asarray(C_chi_mag_at_times.data)
 
     # Use spin components, radii, and center coords of the BHs
     # to make the spin vectors start at the horizon of each BH in the direction of the spin
@@ -294,6 +294,7 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
                           np.asarray([*B_vec_pos_t, B_chi_data[:, 0], B_chi_data[:, 1], B_chi_data[:, 2]]),
                           np.asarray([*C_vec_pos_t, C_chi_data[:, 0], C_chi_data[:, 1], C_chi_data[:, 2]])
                           ]
+    chi_max = max(max(A_chi_mag_data), max(B_chi_mag_data), max(C_chi_mag_data))
 
     all_coords_over_time = [A_coords_data, B_coords_data, C_coords_data]
     all_radii_over_time = [A_rad_data, B_rad_data, C_rad_data]
@@ -345,8 +346,81 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=20, n_phi_bh=40):
 
             surfaces_along_time[i].append((x_surface, y_surface, z_surface))
             
-    return surfaces_along_time, chi_arrays_to_plot
-    
+    omega_orbit = horizons_obj.omega
+
+    return surfaces_along_time, chi_arrays_to_plot, chi_max, omega_orbit
+
+def generate_adaptive_r_coords(
+    angular_velocity_ts: sxs.TimeSeries,
+    lab_time_t: float,
+    r_min: float,
+    r_max: float,
+    max_r_step: float = 40,
+    samples_per_wavelength: float = 5.0
+) -> np.ndarray:
+    """
+    Generates a non-uniform radial grid by adapting to the local spatial
+    wavelength of the gravitational wave.
+
+    Args:
+        angular_velocity_ts: A sxs.TimeSeries object representing the
+                             binary's orbital angular velocity vector over time.
+        lab_time_t: The current lab time of the visualization.
+        r_min, r_max: The radial domain.
+        samples_per_wavelength: Samples per wavelength. Must be > 2.
+                                Higher values (e.g., 5-8) give smoother results.
+
+    Returns:
+        A 1D numpy array of non-uniformly spaced radial coordinates.
+    """
+    r_points = [r_min]
+    current_r = r_min
+
+    # Create an interpolator for the angular velocity for efficiency.
+    # This is much faster than recreating it inside the loop.
+    ang_vel_interp = angular_velocity_ts.interpolate
+
+    # Define a minimum frequency to prevent infinitely large steps
+    # during the very early, slow inspiral. This corresponds to a max
+    # step size of about 25 M.
+    min_omega_gw = 2*np.pi / max_r_step
+
+    while current_r < r_max:
+        retarded_time = np.array([lab_time_t - current_r])
+
+        try:
+            omega_orb = np.asarray(ang_vel_interp(retarded_time).data).ravel()
+            # The dominant GW frequency is twice the orbital frequency.
+            omega_gw = 2.0 * omega_orb
+
+        except ValueError:
+            # If time is out of bounds, use the minimum frequency to step through.
+            omega_gw = min_omega_gw
+
+        # Ensure frequency is not zero to avoid division by zero.
+        omega_gw = max(omega_gw, min_omega_gw)
+        
+        # Calculate the desired step size. The spatial wavelength of the
+        # wave is (2*pi / omega_gw). We sample this wavelength N times.
+        spatial_wavelength = 2.0 * np.pi / omega_gw
+        delta_r = spatial_wavelength / samples_per_wavelength
+        
+        # Advance the current radius
+        current_r += delta_r
+        
+        # Append the new point, but avoid overshooting the boundary.
+        if current_r < r_max:
+            r_points.append(current_r)
+        else:
+            break
+
+
+    # Ensure the last point is exactly r_max for a clean boundary.
+    if r_points[-1] < r_max:
+        r_points.append(r_max)
+        
+    r_points_out = np.flip(np.array(r_points))
+    return r_points_out
 
 def reconstruct_hplus_on_xy_plane_at_time_t(
     sxs_strain_modes: sxs.waveforms.WaveformModes,
@@ -361,42 +435,55 @@ def reconstruct_hplus_on_xy_plane_at_time_t(
     Shape will be (len(r_coords), len(phi_coords)).
     """
     z_displacement_grid = np.zeros((len(r_coords), len(phi_coords)))
+
+    # --- Vectorized Interpolation ---
+    # Create a 1D array of all unique retarded times needed.
+    # This is the core optimization.
+    retarded_times_vec = np.asarray(lab_time_t - r_coords)
+    # Times must be strictly INCREASING
+
+    try:
+        # Perform one single, fast interpolation for all radii at once.
+        strain_modes_at_times_obj = sxs_strain_modes.interpolate(retarded_times_vec)
+        # h_coeffs_matrix will have shape (len(r_coords), n_modes)
+        h_coeffs_matrix = strain_modes_at_times_obj.data
+    except ValueError:
+        print(f"Out of bounds at lab time {lab_time_t}")
+        sys.exit()
+        # This will be raised if any time in retarded_times_vec is out of bounds.
+        # We return a flat plane as a fallback.
+        # A more robust solution could identify which times are valid and set others to zero.
+        # For simplicity here, we assume if one is bad, all are bad for this frame.
+        return z_displacement_grid
+
     theta_val_equator = np.pi / 2.0
-
-    # Prepare the 1D theta array for evaluation.
     theta_for_evaluation = np.full_like(phi_coords, theta_val_equator)
-
-    # Prepare a 1D array of zeros for the third Euler angle, gamma.
-    # This is needed when converting to quaternions if gamma isn't explicitly used
-    # in the evaluation of the scalar field (h+).
     gamma_for_evaluation = np.zeros_like(phi_coords)
-
     # Convert Euler angles (alpha, beta, gamma) to quaternions (rotors).
     # alpha corresponds to phi, beta to theta.
     # This creates an array of quaternion objects, one for each (phi, theta) point.
     rotors_for_evaluation = quaternionic.array.from_euler_angles(phi_coords, theta_for_evaluation, gamma_for_evaluation)
+    
+    ell_min, ell_max = sxs_strain_modes.ell_min, sxs_strain_modes.ell_max
 
-    for i, r_val in enumerate(r_coords):
-        retarded_time_scalar = lab_time_t - r_val
-        retarded_time_for_interp = np.array([retarded_time_scalar])
-
-        try:
-            strain_modes_at_retarded_t_obj = sxs_strain_modes.interpolate(retarded_time_for_interp)
-            h_coeffs_at_ret_t = strain_modes_at_retarded_t_obj.data.ravel()
-            
-            if h_coeffs_at_ret_t.size == 0:
-                z_displacement_grid[i, :] = 0.0
-                continue
-
-        except ValueError:
+    # Now, loop through the results of the interpolation. This loop is much faster
+    # because the expensive part (interpolation) is already done.
+    for i in range(len(r_coords)):
+        # Get the row of coefficients for the i-th radius
+        h_coeffs_for_this_r = h_coeffs_matrix[i, :]
+        
+        if np.all(h_coeffs_for_this_r == 0):
+            # This can happen if the interpolation returned zeros for out-of-bounds times
+            # that were handled internally by sxs.
             z_displacement_grid[i, :] = 0.0
             continue
-
-        
-        sph_modes_obj = spherical.Modes(h_coeffs_at_ret_t,
-                                spin_weight=spin_weight,
-                                ell_min=sxs_strain_modes.ell_min,
-                                ell_max=sxs_strain_modes.ell_max)
+            
+        sph_modes_obj = spherical.Modes(
+            h_coeffs_for_this_r,
+            spin_weight=spin_weight,
+            ell_min=ell_min,
+            ell_max=ell_max
+        )
 
         complex_strain_values_at_r = sph_modes_obj.evaluate(rotors_for_evaluation)
         # Could simply use the scri.WaveformModes.to_grid() method and avoid quaternions,
@@ -418,8 +505,8 @@ def create_merger_movie():
     sim_start_time = strain_modes_sxs.t[0]
     sim_end_time = strain_modes_sxs.t[-1]
     sim_total_time = sim_end_time - sim_start_time
-    anim_start_time = 0.4 * sim_total_time + sim_start_time
-    anim_end_time = 0.82 * sim_total_time + sim_start_time
+    anim_start_time = peak_strain_time - (0.4 * sim_total_time)
+    anim_end_time = (0.08 * sim_total_time) + peak_strain_time
     anim_start_time = max(anim_start_time, sim_start_time)
     anim_end_time = min(anim_end_time, sim_end_time)
     anim_lab_times = np.linspace(
@@ -434,17 +521,13 @@ def create_merger_movie():
     print(common_horizon_start)
     print(peak_strain_time)
 
-    r_gw_axis = np.linspace(MIN_R_GW, MAX_R_GW, N_R_GW)
     phi_gw_axis = np.linspace(0, 2 * np.pi, N_PHI_GW, endpoint=True)
-    PHI_GW_MESH, R_GW_MESH = np.meshgrid(phi_gw_axis, r_gw_axis)
-    X_GW_SURF = R_GW_MESH * np.cos(PHI_GW_MESH)
-    Y_GW_SURF = R_GW_MESH * np.sin(PHI_GW_MESH)
-
 
     mlab.figure(size=(1280, 1024), bgcolor=(0.3, 0.3, 0.3))
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
-    bh_surfs, spin_vectors = get_bh_mesh_data(horizons_data, anim_lab_times)
+    bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times)
+    spin_arrow_size *= 9
 
     frame_files = []
     frames_dir_path = "frames" # Changed directory name as requested
@@ -461,12 +544,28 @@ def create_merger_movie():
         "color": (0.95, 0.85, 0.95), # Light purple
         "outline_thickness": 2
     }
+    no_circle_display_params = {
+        "diameter_pixels": 60,
+        "center_norm_coords": (-1, 2), 
+        "color": (0.3, 0.3, 0.3), # same as background
+        "outline_thickness": 2
+    }
+
 
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
+
     for i_frame, current_lab_time in enumerate(anim_lab_times):
         frame_render_start_time = time.time()
-        print(f"Processing frame {i_frame+1}/{NUM_FRAMES} for lab_time = {current_lab_time:.2f} M")
+        if not auto_loop_bool:
+            print(f"Processing frame {i_frame+1}/{NUM_FRAMES} for lab_time = {current_lab_time:.2f} M")
+
+        r_gw_axis = generate_adaptive_r_coords(orbital_vel_t, current_lab_time, MIN_R_GW, MAX_R_GW, MIN_R_STEP)
+        PHI_GW_MESH, R_GW_MESH = np.meshgrid(phi_gw_axis, r_gw_axis)
+        X_GW_SURF = R_GW_MESH * np.cos(PHI_GW_MESH)
+        Y_GW_SURF = R_GW_MESH * np.sin(PHI_GW_MESH)
+
+
 
         z_gw_frame = reconstruct_hplus_on_xy_plane_at_time_t(
             strain_modes_sxs, current_lab_time, r_gw_axis, phi_gw_axis
@@ -477,16 +576,6 @@ def create_merger_movie():
         if not current_scene or not current_scene.renderer:
             print(f"Error: Could not get valid Mayavi scene/renderer for frame {i_frame}. Skipping.")
             continue
-
-        # plot GW surface
-        mlab.mesh(X_GW_SURF, Y_GW_SURF, z_gw_frame,
-                        color=GW_SURFACE_COLOR,
-                        # representation='wireframe',
-                        name="GW h+ Surface",
-                        opacity=0.75,
-                        )
-        
-
         
         if current_lab_time < common_horizon_start:
             # plot BH1
@@ -500,15 +589,28 @@ def create_merger_movie():
             mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0))
             mlab.quiver3d(*spin_vectors[2][:, i_frame], color=(0.5, 0.5, 0.5), line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size)
         
-        current_anim_frac = (current_lab_time - anim_lab_times[0]) / total_physical_anim_time if total_physical_anim_time > 0 else 0
-        if current_anim_frac < CAMERA_ZOOM_START_TIME_FRAC: cam_dist = CAMERA_INITIAL_DISTANCE
-        elif current_anim_frac > CAMERA_ZOOM_END_TIME_FRAC: cam_dist = CAMERA_FINAL_DISTANCE
-        else:
-            progress = (current_anim_frac - CAMERA_ZOOM_START_TIME_FRAC) / \
-                       (CAMERA_ZOOM_END_TIME_FRAC - CAMERA_ZOOM_START_TIME_FRAC)
-            cam_dist = CAMERA_INITIAL_DISTANCE + (CAMERA_FINAL_DISTANCE - CAMERA_INITIAL_DISTANCE) * progress
-        
-        mlab.view(azimuth=30 + i_frame*0.15, elevation=60, distance=cam_dist, focalpoint=(0,0,0))
+        mlab.view(azimuth=30, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,0))
+
+        # Make progress circle same color as background and move way out of frame
+        progress_circle_actors = update_or_create_progress_circle(
+           scene=current_scene,
+           current_frame=i_frame, 
+           total_frames=NUM_FRAMES, 
+           circle_actors=progress_circle_actors,
+           **no_circle_display_params # Pass display parameters
+        )
+
+        pip_arr_large = mlab.screenshot(antialiased=True)
+
+        # plot GW surface
+        mlab.mesh(X_GW_SURF, Y_GW_SURF, z_gw_frame,
+                        color=GW_SURFACE_COLOR,
+                        # representation='wireframe',
+                        name="GW h+ Surface",
+                        opacity=0.75,
+                        )
+
+        mlab.view(azimuth=30, elevation=60, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
         # <<<< PROGRESS CIRCLE UPDATE >>>>
         progress_circle_actors = update_or_create_progress_circle(
            scene=current_scene,
@@ -518,11 +620,22 @@ def create_merger_movie():
            **circle_display_params # Pass display parameters
         )
         
-        frame_filename = f"{frames_dir_path}/frame_{i_frame:04d}.png"
+        main_arr = mlab.screenshot(antialiased=True)
 
-        mlab.savefig(frame_filename)
+        # Resize PiP image
+        orig_pip_h, orig_pip_w, _ = pip_arr_large.shape
+        new_pip_h, new_pip_w = int(orig_pip_h / PIP_SCALE), int(orig_pip_w / PIP_SCALE)
+        pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
+        # Paste the resized PiP array onto the main array
+        main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
+
+        frame_filename = f"{frames_dir_path}/frame_{i_frame:04d}.png"
+        combined_frame = cv2.cvtColor(main_arr, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(frame_filename, combined_frame)
+
         frame_files.append(frame_filename)
-        print(f"  Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s")
+        if not auto_loop_bool:
+            print(f"  Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s")
 
     print("All animation frames rendered.")
     print("Compiling movie...")
@@ -541,4 +654,10 @@ def create_merger_movie():
     print(f"Total script execution time: {time.time() - script_init_time:.2f} seconds.")
 
 if __name__ == "__main__":
-    create_merger_movie()
+    if auto_loop_bool:
+        for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
+            SXS_ID = f"SXS:BBH:{sxs_idx:04d}"
+            OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_PiP_movie.mp4"
+            create_merger_movie()
+    else:
+        create_merger_movie()
