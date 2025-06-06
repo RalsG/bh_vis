@@ -13,21 +13,22 @@ import inspect
 import sys
 
 # --- Configuration Parameters ---
-SXS_ID = "SXS:BBH:0149"
+SXS_ID = "SXS:BBH:0155"
 OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_PiP_movie.mp4"
 auto_loop_bool = False # option to make many movies
-sxs_idx_start = 150
-loop_size = 10
+sxs_idx_start = 156
+loop_size = 5
 
-NUM_FRAMES = 400
+NUM_FRAMES = 300
 FPS = 24
 
 # GW Surface Visualization Parameters
-MAX_R_STEP = 60 # In units of M for the adaptive grid sampling
-N_PHI_GW = 240
+MAX_R_STEP = 40.0 # In units of M for the adaptive grid sampling.
+MIN_R_STEP = 0.7
+PEAK_POINTS_PER_WAVE = 20.0 # Higher means more compute but smoother surface waves
 MIN_R_GW = 10.0
 MAX_R_GW = 800.0
-AMPLITUDE_SCALE = 0.45 * MAX_R_GW # Factor to scale h+ for z-displacement (TUNE THIS!)
+AMPLITUDE_SCALE = 0.35 * MAX_R_GW # Factor to scale h+ for z-displacement (TUNE THIS!)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 
 PIP_CAMERA_DISTANCE = MIN_R_GW * 2.2
@@ -68,6 +69,7 @@ def update_or_create_progress_circle(scene, current_frame, total_frames,
     if render_window:
         window_width, window_height = render_window.size
         if window_width > 0 and window_height > 0:
+            window_height += 60 # something wrong with circle being actually circular - this is TEMPORARY
             valid_size_obtained = True
 
     if not valid_size_obtained:
@@ -95,6 +97,16 @@ def update_or_create_progress_circle(scene, current_frame, total_frames,
         norm_diameter_h = float(diameter_pixels) / default_dimension_for_pixel_calc
         # Store 0,0 to ensure resize logic triggers on next frame if actual size becomes known
         window_width, window_height = 0,0
+
+    print(f"DEBUG Circle Sizing: diameter_pixels={diameter_pixels}")
+    print(f"DEBUG Circle Sizing: window_width={window_width}, window_height={window_height}")
+    print(f"DEBUG Circle Sizing: norm_diameter_w={norm_diameter_w:.6f}, norm_diameter_h={norm_diameter_h:.6f}")
+    if window_width > 0 and window_height > 0 and valid_size_obtained: # ensure we use valid W,H
+        expected_pixel_w = norm_diameter_w * window_width
+        expected_pixel_h = norm_diameter_h * window_height
+        print(f"DEBUG Circle Sizing: Expected final pixel w={expected_pixel_w:.2f}, h={expected_pixel_h:.2f}")
+    elif not valid_size_obtained:
+        print(f"DEBUG Circle Sizing: Using fallback sizing. Expected norm_w={norm_diameter_w:.6f}, norm_h={norm_diameter_h:.6f}")
 
     actor_pos_x = center_norm_coords[0] - norm_diameter_w / 2.0
     actor_pos_y = center_norm_coords[1] - norm_diameter_h / 2.0
@@ -168,12 +180,12 @@ def update_or_create_progress_circle(scene, current_frame, total_frames,
         outline_actor.GetProperty().SetLineWidth(outline_thickness)
         fill_actor.GetProperty().SetColor(color)
 
-        # IMPORTANT: Re-add actors to the renderer, as mlab.clf() is assumed to remove them. (Expert 1's core logic)
+        """# IMPORTANT: Re-add actors to the renderer, as mlab.clf() is assumed to remove them. (Expert 1's core logic)
         # To be robust, remove first in case of any weird state, then add.
         renderer.remove_actor(outline_actor) 
         renderer.add_actor(outline_actor)
         renderer.remove_actor(fill_actor)
-        renderer.add_actor(fill_actor)
+        renderer.add_actor(fill_actor)"""
         
         # Check if window size or other geometry-defining parameters changed
         current_params_window_size = (window_width, window_height) # The size used for calculations in *this* call.
@@ -353,10 +365,12 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20):
 def generate_adaptive_r_coords(
     angular_velocity_ts: sxs.TimeSeries,
     lab_time_t: float,
+    peak_strain_t: float,
     r_min: float,
     r_max: float,
-    max_r_step: float = 40,
-    samples_per_wavelength: float = 5.0
+    max_r_step: float = 40.0,
+    min_r_step: float = 1.0,
+    peak_samples_per_wave = 20.0
 ) -> np.ndarray:
     """
     Generates a non-uniform radial grid by adapting to the local spatial
@@ -373,38 +387,53 @@ def generate_adaptive_r_coords(
     Returns:
         A 1D numpy array of non-uniformly spaced radial coordinates.
     """
+
     r_points = [r_min]
     current_r = r_min
+    samples_per_wavelength = peak_samples_per_wave/2
 
     # Create an interpolator for the angular velocity for efficiency.
     # This is much faster than recreating it inside the loop.
     ang_vel_interp = angular_velocity_ts.interpolate
 
     # Define a minimum frequency to prevent infinitely large steps
-    # during the very early, slow inspiral. This corresponds to a max
-    # step size of about 25 M.
-    min_omega_gw = 2*np.pi / max_r_step
+    # during the very early, slow inspiral.
+    min_omega_gw = 2*np.pi / (max_r_step * samples_per_wavelength)
 
     while current_r < r_max:
         retarded_time = np.array([lab_time_t - current_r])
 
-        try:
-            omega_orb = np.asarray(ang_vel_interp(retarded_time).data).ravel()
-            # The dominant GW frequency is twice the orbital frequency.
-            omega_gw = 2.0 * omega_orb
+        if retarded_time[0] > (1.02 * peak_strain_t):
+            delta_r = max_r_step / 3
 
-        except ValueError:
-            # If time is out of bounds, use the minimum frequency to step through.
-            omega_gw = min_omega_gw
+        elif retarded_time[0] > (0.98 * peak_strain_t):
+            delta_r = min_r_step
 
-        # Ensure frequency is not zero to avoid division by zero.
-        omega_gw = max(omega_gw, min_omega_gw)
-        
-        # Calculate the desired step size. The spatial wavelength of the
-        # wave is (2*pi / omega_gw). We sample this wavelength N times.
-        spatial_wavelength = 2.0 * np.pi / omega_gw
-        delta_r = spatial_wavelength / samples_per_wavelength
-        
+        else:
+            if retarded_time[0] > (0.5 * peak_strain_t):
+                samples_per_wavelength = peak_samples_per_wave * (retarded_time[0] / peak_strain_t)
+
+            try:
+                omega_orb = ang_vel_interp(retarded_time).data[0]
+
+                # The dominant GW frequency is twice the orbital frequency.
+                omega_gw = 2.0 * omega_orb
+
+            except ValueError:
+                # If time is out of bounds, use the minimum frequency to step through.
+                omega_gw = min_omega_gw
+
+            # Ensure frequency is not zero to avoid division by zero.
+            omega_gw = max(omega_gw, min_omega_gw)
+
+            # Calculate the desired step size. The spatial wavelength of the
+            # wave is (2*pi / omega_gw). We sample this wavelength N times.
+            spatial_wavelength = 2.0 * np.pi / omega_gw
+            delta_r = spatial_wavelength / samples_per_wavelength
+            if delta_r < min_r_step:
+                print(f"it's getting gritty at {retarded_time[0]}")
+            delta_r = max(delta_r, min_r_step)
+
         # Advance the current radius
         current_r += delta_r
         
@@ -418,7 +447,7 @@ def generate_adaptive_r_coords(
     # Ensure the last point is exactly r_max for a clean boundary.
     if r_points[-1] < r_max:
         r_points.append(r_max)
-        
+
     r_points_out = np.flip(np.array(r_points))
     return r_points_out
 
@@ -505,8 +534,8 @@ def create_merger_movie():
     sim_start_time = strain_modes_sxs.t[0]
     sim_end_time = strain_modes_sxs.t[-1]
     sim_total_time = sim_end_time - sim_start_time
-    anim_start_time = peak_strain_time - (0.4 * sim_total_time)
-    anim_end_time = (0.08 * sim_total_time) + peak_strain_time
+    anim_start_time = peak_strain_time - (0.6 * sim_total_time)
+    anim_end_time = (0.13 * sim_total_time) + peak_strain_time
     anim_start_time = max(anim_start_time, sim_start_time)
     anim_end_time = min(anim_end_time, sim_end_time)
     anim_lab_times = np.linspace(
@@ -521,9 +550,7 @@ def create_merger_movie():
     print(common_horizon_start)
     print(peak_strain_time)
 
-    phi_gw_axis = np.linspace(0, 2 * np.pi, N_PHI_GW, endpoint=True)
-
-    mlab.figure(size=(1280, 1024), bgcolor=(0.3, 0.3, 0.3))
+    mlab.figure(size=(1280, 1040), bgcolor=(0.3, 0.3, 0.3))
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
     bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times)
@@ -554,13 +581,22 @@ def create_merger_movie():
 
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
+    r_points_sum = 0
 
     for i_frame, current_lab_time in enumerate(anim_lab_times):
+        if i_frame > 0:
+            sys.exit()
+
         frame_render_start_time = time.time()
         if not auto_loop_bool:
             print(f"Processing frame {i_frame+1}/{NUM_FRAMES} for lab_time = {current_lab_time:.2f} M")
 
-        r_gw_axis = generate_adaptive_r_coords(orbital_vel_t, current_lab_time, MIN_R_GW, MAX_R_GW, MIN_R_STEP)
+        r_gw_axis = generate_adaptive_r_coords(orbital_vel_t, current_lab_time,
+                                               peak_strain_time, MIN_R_GW,
+                                               MAX_R_GW, MAX_R_STEP, MIN_R_STEP, PEAK_POINTS_PER_WAVE)
+        num_r_points = len(r_gw_axis)
+        r_points_sum += num_r_points
+        phi_gw_axis = np.linspace(0, 2 * np.pi, num_r_points, endpoint=True)
         PHI_GW_MESH, R_GW_MESH = np.meshgrid(phi_gw_axis, r_gw_axis)
         X_GW_SURF = R_GW_MESH * np.cos(PHI_GW_MESH)
         Y_GW_SURF = R_GW_MESH * np.sin(PHI_GW_MESH)
@@ -607,7 +643,7 @@ def create_merger_movie():
                         color=GW_SURFACE_COLOR,
                         # representation='wireframe',
                         name="GW h+ Surface",
-                        opacity=0.75,
+                        opacity=0.95,
                         )
 
         mlab.view(azimuth=30, elevation=60, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
@@ -635,9 +671,10 @@ def create_merger_movie():
 
         frame_files.append(frame_filename)
         if not auto_loop_bool:
-            print(f"  Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s")
+            print(f"  Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s. Used {num_r_points} radial points.")
 
     print("All animation frames rendered.")
+    print(f"{r_points_sum/NUM_FRAMES} average radial points used")
     print("Compiling movie...")
 
     images = []
