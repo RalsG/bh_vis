@@ -13,13 +13,13 @@ import inspect
 import sys
 
 # --- Configuration Parameters ---
-SXS_ID = "SXS:BBH:0155"
+SXS_ID = "SXS:BBH:0250"
 OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_PiP_movie.mp4"
 auto_loop_bool = False # option to make many movies
-sxs_idx_start = 156
-loop_size = 5
-
-NUM_FRAMES = 300
+sxs_idx_start = 160
+loop_size = 4
+representation_str = 'fancymesh'
+NUM_FRAMES = 200
 FPS = 24
 
 # GW Surface Visualization Parameters
@@ -30,8 +30,10 @@ MIN_R_GW = 10.0
 MAX_R_GW = 800.0
 AMPLITUDE_SCALE = 0.35 * MAX_R_GW # Factor to scale h+ for z-displacement (TUNE THIS!)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
+BG_COLOR = (0.4, 0.4, 0.4)
+SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
 
-PIP_CAMERA_DISTANCE = MIN_R_GW * 2.2
+PIP_CAMERA_DISTANCE = MIN_R_GW * 2.6
 MAIN_CAMERA_DISTANCE = MAX_R_GW * 1.8
 PIP_SCALE = 3.5 # This is the ratio of main scene to PiP
 antial_bool = False
@@ -39,8 +41,8 @@ antial_bool = False
 # --- Helper Functions ---
 def update_or_create_progress_circle(scene, current_frame, total_frames,
                                      circle_actors=None,
-                                     diameter_pixels=20,
-                                     center_norm_coords=(0.05, 0.95), # (x_center, y_center) from bottom-left
+                                     diameter_pixels=100,
+                                     center_norm_coords=(0.07, 0.95), # (x_center, y_center) from bottom-left
                                      color=(0.9, 0.9, 0.9),
                                      outline_thickness=2):
     """
@@ -69,145 +71,87 @@ def update_or_create_progress_circle(scene, current_frame, total_frames,
     if render_window:
         window_width, window_height = render_window.size
         if window_width > 0 and window_height > 0:
-            window_height += 60 # something wrong with circle being actually circular - this is TEMPORARY
             valid_size_obtained = True
 
     if not valid_size_obtained:
-        # Try scene.parent.size (often the figure size, from Expert 1)
-        if hasattr(scene, 'parent') and hasattr(scene.parent, 'size') and \
-           scene.parent.size[0] > 0 and scene.parent.size[1] > 0:
-            window_width, window_height = scene.parent.size
+        viewport_size = renderer.GetSize()
+        if viewport_size[0] > 0 and viewport_size[1] > 0:
+            window_width, window_height = viewport_size
             valid_size_obtained = True
-        else: # Try renderer's viewport size (from original and Expert 1 & 2)
-            viewport_size = renderer.GetSize()
-            if viewport_size[0] > 0 and viewport_size[1] > 0:
-                window_width, window_height = viewport_size
-                valid_size_obtained = True
+        else:
+            print(f"Warning: Window/Renderer size is {window_width}x{window_height} for progress circle. "
+                  f"Using fallback based on diameter_pixels and assumed 800px dimension.")
+            window_width, window_height = 800, 800
 
     # Calculate normalized dimensions for the circle
-    if valid_size_obtained:
-        norm_diameter_w = float(diameter_pixels) / window_width
-        norm_diameter_h = float(diameter_pixels) / window_height
-    else: # Fallback if size is still unknown (e.g., offscreen, pre-first-render)
-        print(f"Warning: Window/Renderer size is {window_width}x{window_height} for progress circle. "
-              f"Using fallback based on diameter_pixels and assumed 800px dimension.")
-        # Fallback inspired by Expert 1: pixel-based using a default assumed dimension
-        default_dimension_for_pixel_calc = 800.0
-        norm_diameter_w = float(diameter_pixels) / default_dimension_for_pixel_calc
-        norm_diameter_h = float(diameter_pixels) / default_dimension_for_pixel_calc
-        # Store 0,0 to ensure resize logic triggers on next frame if actual size becomes known
-        window_width, window_height = 0,0
+    # --- Calculate position in PIXEL coordinates ---
+    radius_pixels = diameter_pixels / 2.0
+    center_x_pix = center_norm_coords[0] * window_width
+    center_y_pix = center_norm_coords[1] * window_height
+    
+    # Actor position is the bottom left of its bounding box
+    actor_pos_x = center_x_pix - radius_pixels
+    actor_pos_y = center_y_pix - radius_pixels
 
-    print(f"DEBUG Circle Sizing: diameter_pixels={diameter_pixels}")
-    print(f"DEBUG Circle Sizing: window_width={window_width}, window_height={window_height}")
-    print(f"DEBUG Circle Sizing: norm_diameter_w={norm_diameter_w:.6f}, norm_diameter_h={norm_diameter_h:.6f}")
-    if window_width > 0 and window_height > 0 and valid_size_obtained: # ensure we use valid W,H
-        expected_pixel_w = norm_diameter_w * window_width
-        expected_pixel_h = norm_diameter_h * window_height
-        print(f"DEBUG Circle Sizing: Expected final pixel w={expected_pixel_w:.2f}, h={expected_pixel_h:.2f}")
-    elif not valid_size_obtained:
-        print(f"DEBUG Circle Sizing: Using fallback sizing. Expected norm_w={norm_diameter_w:.6f}, norm_h={norm_diameter_h:.6f}")
-
-    actor_pos_x = center_norm_coords[0] - norm_diameter_w / 2.0
-    actor_pos_y = center_norm_coords[1] - norm_diameter_h / 2.0
 
     if circle_actors is None:
         circle_actors = {}
 
-        # Outline Actor
+        # --- Define geometry in PIXEL units ---
+        # The radius is now half the desired pixel diameter.
         outline_source = vtk.vtkRegularPolygonSource()
         outline_source.SetNumberOfSides(60)
-        outline_source.SetRadius(0.07)
+        outline_source.SetRadius(radius_pixels)
         outline_source.SetCenter(0, 0, 0)
         outline_source.GeneratePolygonOff()
         outline_source.GeneratePolylineOn()
-        # outline_source.Update() # Mapper will call it
-
-        outline_mapper = vtk.vtkPolyDataMapper2D()
-        outline_mapper.SetInputConnection(outline_source.GetOutputPort())
-        transform_coords_outline = vtk.vtkCoordinate()
-        transform_coords_outline.SetCoordinateSystemToNormalizedViewport()
-        outline_mapper.SetTransformCoordinate(transform_coords_outline)
-
-        outline_actor = vtk.vtkActor2D()
-        outline_actor.SetMapper(outline_mapper)
-        outline_actor.GetProperty().SetColor(color)
-        outline_actor.GetProperty().SetLineWidth(outline_thickness)
-        outline_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-        outline_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
-        outline_actor.SetWidth(norm_diameter_w)
-        outline_actor.SetHeight(norm_diameter_h)
         
-        renderer.add_actor(outline_actor)
-        circle_actors['outline_source'] = outline_source
-        circle_actors['outline_actor'] = outline_actor
-
-        # Fill Actor
         fill_source = vtk.vtkSectorSource()
         fill_source.SetInnerRadius(0.0)
-        fill_source.SetOuterRadius(0.07)
+        fill_source.SetOuterRadius(radius_pixels)
         fill_source.SetCircumferentialResolution(60)
-
+        
+        outline_mapper = vtk.vtkPolyDataMapper2D()
+        outline_mapper.SetInputConnection(outline_source.GetOutputPort())
+        outline_actor = vtk.vtkActor2D()
+        outline_actor.SetMapper(outline_mapper)
+        
         fill_mapper = vtk.vtkPolyDataMapper2D()
         fill_mapper.SetInputConnection(fill_source.GetOutputPort())
-        transform_coords_fill = vtk.vtkCoordinate()
-        transform_coords_fill.SetCoordinateSystemToNormalizedViewport()
-        fill_mapper.SetTransformCoordinate(transform_coords_fill)
-
         fill_actor = vtk.vtkActor2D()
         fill_actor.SetMapper(fill_mapper)
-        fill_actor.GetProperty().SetColor(color)
-        fill_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-        fill_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
-        fill_actor.SetWidth(norm_diameter_w)
-        fill_actor.SetHeight(norm_diameter_h)
 
-        renderer.add_actor(fill_actor)
-        circle_actors['fill_source'] = fill_source
-        circle_actors['fill_actor'] = fill_actor
+        # *** THE CORE OF THE FIX ***
+        # Set the actor's position coordinate system to use pixels. This makes
+        # the actor's position and its source geometry live in the same,
+        # aspect-ratio-immune coordinate space.
+        outline_actor.GetPositionCoordinate().SetCoordinateSystemToDisplay()
+        fill_actor.GetPositionCoordinate().SetCoordinateSystemToDisplay()
         
-        circle_actors['last_window_size'] = (window_width, window_height) # Could be (0,0)
-        circle_actors['last_center_norm_coords'] = center_norm_coords
-        circle_actors['last_diameter_pixels'] = diameter_pixels
-
-    else: # circle_actors dictionary exists, VTK objects are already created.
-        outline_actor = circle_actors['outline_actor']
-        fill_actor = circle_actors['fill_actor']
-        fill_source = circle_actors['fill_source']
-
-        # Update properties that might change frame-to-frame (inspired by Expert 3)
-        outline_actor.GetProperty().SetColor(color)
-        outline_actor.GetProperty().SetLineWidth(outline_thickness)
-        fill_actor.GetProperty().SetColor(color)
-
-        """# IMPORTANT: Re-add actors to the renderer, as mlab.clf() is assumed to remove them. (Expert 1's core logic)
-        # To be robust, remove first in case of any weird state, then add.
-        renderer.remove_actor(outline_actor) 
         renderer.add_actor(outline_actor)
-        renderer.remove_actor(fill_actor)
-        renderer.add_actor(fill_actor)"""
-        
-        # Check if window size or other geometry-defining parameters changed
-        current_params_window_size = (window_width, window_height) # The size used for calculations in *this* call.
-        
-        if current_params_window_size != circle_actors.get('last_window_size') or \
-           center_norm_coords != circle_actors.get('last_center_norm_coords') or \
-           diameter_pixels != circle_actors.get('last_diameter_pixels'):
+        renderer.add_actor(fill_actor)
+        circle_actors.update({
+            'outline_actor': outline_actor, 'outline_source': outline_source,
+            'fill_actor': fill_actor, 'fill_source': fill_source
+        })
+    else:
+        # Actors already exist, just retrieve them
+        outline_actor = circle_actors['outline_actor']; fill_actor = circle_actors['fill_actor']
+        outline_source = circle_actors['outline_source']; fill_source = circle_actors['fill_source']
+        renderer.remove_actor(outline_actor); renderer.add_actor(outline_actor)
+        renderer.remove_actor(fill_actor); renderer.add_actor(fill_actor)
 
-            # Update actor position and size properties only if current_params_window_size reflects a valid size
-            # The variables actor_pos_x, actor_pos_y, norm_diameter_w, norm_diameter_h reflect current params.
-            if window_width > 0 and window_height > 0: # Ensure we are updating with valid dimensions
-                outline_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
-                outline_actor.SetWidth(norm_diameter_w)
-                outline_actor.SetHeight(norm_diameter_h)
+    # --- Apply properties every frame ---
+    outline_source.SetRadius(radius_pixels)
+    fill_source.SetOuterRadius(radius_pixels)
+    outline_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
+    fill_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
 
-                fill_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
-                fill_actor.SetWidth(norm_diameter_w)
-                fill_actor.SetHeight(norm_diameter_h)
-                
-                circle_actors['last_window_size'] = current_params_window_size
-                circle_actors['last_center_norm_coords'] = center_norm_coords
-                circle_actors['last_diameter_pixels'] = diameter_pixels
+    outline_actor.GetProperty().SetColor(color)
+    outline_actor.GetProperty().SetLineWidth(outline_thickness)
+    fill_actor.GetProperty().SetColor(color)
+
+    
 
     # Update progress display
     if total_frames <= 0: 
@@ -306,12 +250,11 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20):
                           np.asarray([*B_vec_pos_t, B_chi_data[:, 0], B_chi_data[:, 1], B_chi_data[:, 2]]),
                           np.asarray([*C_vec_pos_t, C_chi_data[:, 0], C_chi_data[:, 1], C_chi_data[:, 2]])
                           ]
-    chi_max = max(max(A_chi_mag_data), max(B_chi_mag_data), max(C_chi_mag_data))
+    chi_max = max(np.max(A_chi_mag_data), np.max(B_chi_mag_data), np.max(C_chi_mag_data))
 
+    # Now for actual BH surfaces
     all_coords_over_time = [A_coords_data, B_coords_data, C_coords_data]
     all_radii_over_time = [A_rad_data, B_rad_data, C_rad_data]
-
-
     surfaces_along_time = [[], [], []] # To store [(x,y,z)_t0, (x,y,z)_t1, ...] for each BH
 
     # --- Pre-calculate unit sphere points ---
@@ -403,8 +346,11 @@ def generate_adaptive_r_coords(
     while current_r < r_max:
         retarded_time = np.array([lab_time_t - current_r])
 
-        if retarded_time[0] > (1.02 * peak_strain_t):
+        if retarded_time[0] > (1.05 * peak_strain_t):
             delta_r = max_r_step / 3
+
+        elif retarded_time[0] > (1.02 * peak_strain_t):
+            delta_r = min_r_step*4
 
         elif retarded_time[0] > (0.98 * peak_strain_t):
             delta_r = min_r_step
@@ -550,7 +496,7 @@ def create_merger_movie():
     print(common_horizon_start)
     print(peak_strain_time)
 
-    mlab.figure(size=(1280, 1040), bgcolor=(0.3, 0.3, 0.3))
+    mlab.figure(size=(1280, 1024), bgcolor=BG_COLOR)
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
     bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times)
@@ -566,16 +512,14 @@ def create_merger_movie():
     progress_circle_actors = None 
     # Parameters for the progress circle (can be defined once if static)
     circle_display_params = {
-        "diameter_pixels": 60,
-        "center_norm_coords": (0.1, 0.95), 
+        "diameter_pixels": 160,
+        "center_norm_coords": (0.145, 0.98), 
         "color": (0.95, 0.85, 0.95), # Light purple
         "outline_thickness": 2
     }
     no_circle_display_params = {
-        "diameter_pixels": 60,
         "center_norm_coords": (-1, 2), 
-        "color": (0.3, 0.3, 0.3), # same as background
-        "outline_thickness": 2
+        "color": BG_COLOR, # same as background
     }
 
 
@@ -584,8 +528,6 @@ def create_merger_movie():
     r_points_sum = 0
 
     for i_frame, current_lab_time in enumerate(anim_lab_times):
-        if i_frame > 0:
-            sys.exit()
 
         frame_render_start_time = time.time()
         if not auto_loop_bool:
@@ -616,15 +558,15 @@ def create_merger_movie():
         if current_lab_time < common_horizon_start:
             # plot BH1
             mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0))
-            mlab.quiver3d(*spin_vectors[0][:, i_frame], color=(0.5, 0.5, 0.5), line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size)
+            spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size)
             # plot BH2
             mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0))
-            mlab.quiver3d(*spin_vectors[1][:, i_frame], color=(0.5, 0.5, 0.5), line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size)
+            spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size)
         else:
             # plot merged BH
             mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0))
-            mlab.quiver3d(*spin_vectors[2][:, i_frame], color=(0.5, 0.5, 0.5), line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size)
-        
+            spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size)
+
         mlab.view(azimuth=30, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,0))
 
         # Make progress circle same color as background and move way out of frame
@@ -637,11 +579,17 @@ def create_merger_movie():
         )
 
         pip_arr_large = mlab.screenshot(antialiased=True)
+        if current_lab_time < common_horizon_start:
+            spin1_obj.remove()
+            spin2_obj.remove()
+        else:
+            spin3_obj.remove()
+
 
         # plot GW surface
         mlab.mesh(X_GW_SURF, Y_GW_SURF, z_gw_frame,
                         color=GW_SURFACE_COLOR,
-                        # representation='wireframe',
+                        representation=representation_str,
                         name="GW h+ Surface",
                         opacity=0.95,
                         )
@@ -671,7 +619,7 @@ def create_merger_movie():
 
         frame_files.append(frame_filename)
         if not auto_loop_bool:
-            print(f"  Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s. Used {num_r_points} radial points.")
+            print(f"Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s using {num_r_points} radial points.")
 
     print("All animation frames rendered.")
     print(f"{r_points_sum/NUM_FRAMES} average radial points used")
@@ -692,9 +640,20 @@ def create_merger_movie():
 
 if __name__ == "__main__":
     if auto_loop_bool:
+        surface_change_bool = False
+        if representation_str != 'surface' or None:
+            surface_change_bool = True
+        else:
+            representation_str = 'surface'
+
         for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
             SXS_ID = f"SXS:BBH:{sxs_idx:04d}"
             OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_PiP_movie.mp4"
             create_merger_movie()
+            if surface_change_bool:
+                if representation_str == 'surface':
+                    representation_str = 'wireframe'
+                else:
+                    representation_str = 'surface'
     else:
         create_merger_movie()
