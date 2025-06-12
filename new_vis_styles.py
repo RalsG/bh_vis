@@ -1,10 +1,9 @@
 import numpy as np
 import sxs
-from sxs.waveforms import WaveformModes # For type hints
 import spherical
 import quaternionic
 from mayavi import mlab
-from tvtk.api import tvtk
+import matplotlib.pyplot as plt
 import vtk
 import imageio.v2 as imageio # clarification
 import cv2
@@ -14,169 +13,34 @@ import inspect
 import sys
 
 # --- Configuration Parameters ---
-SXS_ID = "SXS:BBH:0308"
+SXS_ID = "SXS:BBH:0001"
 OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_PiP_movie.mp4"
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 160
 loop_size = 4
 representation_str = 'surface'
-NUM_FRAMES = 300
+NUM_FRAMES = 50
 FPS = 24
 
 # GW Surface Visualization Parameters
 MAX_R_STEP = 40.0 # In units of M for the adaptive grid sampling.
 MIN_R_STEP = 0.7
-PEAK_POINTS_PER_WAVE = 15.0 # Higher means more compute but smoother surface waves
-MIN_R_GW = 30.0
-MAX_R_GW = 400.0
-AMPLITUDE_SCALE = 0.35 * MAX_R_GW # Factor to scale h+ for z-displacement (TUNE THIS!)
+PEAK_POINTS_PER_WAVE = 20.0 # Higher means more compute but smoother surface waves
+MIN_R_GW = 12.0
+MAX_R_GW = 800.0
+AMPLITUDE_SCALE = 0.45 * MAX_R_GW # Factor to scale h+ for z-displacement (TUNE THIS!)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.4, 0.4, 0.4)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
 
-PIP_CAMERA_DISTANCE = MIN_R_GW * 2.6
+PIP_CAMERA_DISTANCE = MIN_R_GW * 2.5
 MAIN_CAMERA_DISTANCE = MAX_R_GW * 1.8
-PIP_SCALE = 3.5 # This is the ratio of main scene to PiP
+PIP_SCALE = 2.7 # This is the ratio of window to PiP
+PROGRESS_WAVE_SCALE = 8 # ratio of window to progress waveform
 antial_bool = False
 
 
 # --- Helper Functions ---
-def update_or_create_progress_circle(scene, current_frame, total_frames,
-                                     circle_actors=None,
-                                     diameter_pixels=100,
-                                     center_norm_coords=(0.07, 0.95), # (x_center, y_center) from bottom-left
-                                     color=(0.9, 0.9, 0.9),
-                                     outline_thickness=2):
-    """
-    Creates or updates a clockwise progress circle overlay in a Mayavi scene.
-    This version assumes mlab.clf() removes actors from the renderer,
-    so it re-adds them each frame if they exist.
-    It also incorporates robust window size detection.
-    """
-    if scene is None:
-        figure = mlab.gcf()
-        if figure is None:
-            print("Error: No Mayavi scene/figure found for progress circle.")
-            return None
-        scene = figure.scene
-    
-    renderer = scene.renderer
-    render_window = scene.render_window
-    if renderer is None: # Added check for renderer
-        print("Error: Scene has no renderer for progress circle.")
-        return None
-    
-    # Robust window size determination (combining ideas from Expert 1 and 2)
-    window_width, window_height = 0, 0
-    valid_size_obtained = False
-
-    if render_window:
-        window_width, window_height = render_window.size
-        if window_width > 0 and window_height > 0:
-            valid_size_obtained = True
-
-    if not valid_size_obtained:
-        viewport_size = renderer.GetSize()
-        if viewport_size[0] > 0 and viewport_size[1] > 0:
-            window_width, window_height = viewport_size
-            valid_size_obtained = True
-        else:
-            print(f"Warning: Window/Renderer size is {window_width}x{window_height} for progress circle. "
-                  f"Using fallback based on diameter_pixels and assumed 800px dimension.")
-            window_width, window_height = 800, 800
-
-    # Calculate normalized dimensions for the circle
-    # --- Calculate position in PIXEL coordinates ---
-    radius_pixels = diameter_pixels / 2.0
-    center_x_pix = center_norm_coords[0] * window_width
-    center_y_pix = center_norm_coords[1] * window_height
-    
-    # Actor position is the bottom left of its bounding box
-    actor_pos_x = center_x_pix - radius_pixels
-    actor_pos_y = center_y_pix - radius_pixels
-
-    if circle_actors is None:
-        circle_actors = {}
-
-        # --- Define geometry in PIXEL units ---
-        # The radius is now half the desired pixel diameter.
-        outline_source = vtk.vtkRegularPolygonSource()
-        outline_source.SetNumberOfSides(60)
-        outline_source.SetRadius(radius_pixels)
-        outline_source.SetCenter(0, 0, 0)
-        outline_source.GeneratePolygonOff()
-        outline_source.GeneratePolylineOn()
-        
-        fill_source = vtk.vtkSectorSource()
-        fill_source.SetInnerRadius(0.0)
-        fill_source.SetOuterRadius(radius_pixels)
-        fill_source.SetCircumferentialResolution(60)
-        
-        outline_mapper = vtk.vtkPolyDataMapper2D()
-        outline_mapper.SetInputConnection(outline_source.GetOutputPort())
-        outline_actor = vtk.vtkActor2D()
-        outline_actor.SetMapper(outline_mapper)
-        
-        fill_mapper = vtk.vtkPolyDataMapper2D()
-        fill_mapper.SetInputConnection(fill_source.GetOutputPort())
-        fill_actor = vtk.vtkActor2D()
-        fill_actor.SetMapper(fill_mapper)
-
-        # *** THE CORE OF THE FIX ***
-        # Set the actor's position coordinate system to use pixels. This makes
-        # the actor's position and its source geometry live in the same,
-        # aspect-ratio-immune coordinate space.
-        outline_actor.GetPositionCoordinate().SetCoordinateSystemToDisplay()
-        fill_actor.GetPositionCoordinate().SetCoordinateSystemToDisplay()
-        
-        renderer.add_actor(outline_actor)
-        renderer.add_actor(fill_actor)
-        circle_actors.update({
-            'outline_actor': outline_actor, 'outline_source': outline_source,
-            'fill_actor': fill_actor, 'fill_source': fill_source
-        })
-    else:
-        # Actors already exist, just retrieve them
-        outline_actor = circle_actors['outline_actor']; fill_actor = circle_actors['fill_actor']
-        outline_source = circle_actors['outline_source']; fill_source = circle_actors['fill_source']
-        renderer.remove_actor(outline_actor); renderer.add_actor(outline_actor)
-        renderer.remove_actor(fill_actor); renderer.add_actor(fill_actor)
-
-    # --- Apply properties every frame ---
-    outline_source.SetRadius(radius_pixels)
-    fill_source.SetOuterRadius(radius_pixels)
-    outline_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
-    fill_actor.GetPositionCoordinate().SetValue(actor_pos_x, actor_pos_y)
-
-    outline_actor.GetProperty().SetColor(color)
-    outline_actor.GetProperty().SetLineWidth(outline_thickness)
-    fill_actor.GetProperty().SetColor(color)
-
-    
-
-    # Update progress display
-    if total_frames <= 0: 
-        progress = 0.0
-    else: 
-        progress = min(1.0, max(0.0, float(current_frame + 1) / total_frames)) 
-
-    if progress == 0.0:
-        circle_actors['fill_actor'].SetVisibility(0)
-    elif progress >= 0.9999: # Use a threshold for "full" to handle float precision
-        circle_actors['fill_actor'].SetVisibility(1)
-        fill_source.SetStartAngle(90.0)
-        fill_source.SetEndAngle(90.0 + 359.99)
-    else:
-        circle_actors['fill_actor'].SetVisibility(1)
-        sweep_angle_deg = progress * 360.0
-        fill_source.SetStartAngle(450.0 - sweep_angle_deg)
-        fill_source.SetEndAngle(450.0)
-    
-    fill_source.Update() # Crucial to update the vtkSectorSource geometry
-    return circle_actors
-
-
-# load_simulation_data remains the same
 def load_simulation_data(sxs_id_str):
     print(f"Loading simulation: {sxs_id_str}")
     try:
@@ -196,6 +60,98 @@ def load_simulation_data(sxs_id_str):
     else: print(f"Warning: horizons not found or empty for simulation {sxs_id_str}.")
 
     return strain_modes, psi4_modes, horizons_data
+
+def pseudo_uniform_times(
+        sample_times: np.ndarray,
+        peak_strain_time: float,
+        start_back_prop: float = 0.6,
+        end_for_prop: float = 0.15
+):
+    sim_start_time = sample_times[0]
+    sim_end_time = sample_times[-1]
+    sim_total_time = sim_end_time - sim_start_time
+    anim_start_time = peak_strain_time - (start_back_prop * sim_total_time)
+    anim_end_time = (end_for_prop * sim_total_time) + peak_strain_time
+    anim_start_time = max(anim_start_time, sim_start_time)
+    anim_end_time = min(anim_end_time, sim_end_time)
+
+    uniform_time_array = np.linspace(
+        anim_start_time,
+        anim_end_time,
+        NUM_FRAMES, endpoint=True
+    )
+    anim_time_indices = np.searchsorted(sample_times, uniform_time_array)
+    anim_time_array = sample_times[anim_time_indices]
+
+    return anim_time_array, anim_time_indices
+
+
+def make_progress_signal_plot(dom_mode_signal: sxs.waveforms.WaveformModes,
+                            anim_lab_times: np.ndarray,
+                            anim_time_indices: np.ndarray,
+                            current_frame_index: int,
+                            width: int,
+                            height: int,
+                            bg_color: tuple[float, float, float]
+):
+    trimmed_strain_signal = dom_mode_signal[anim_time_indices[0]:(anim_time_indices[-1] + 1)]
+    print(len(dom_mode_signal), len(trimmed_strain_signal))
+    print(dom_mode_signal)
+    print(trimmed_strain_signal)
+    time_array = trimmed_strain_signal.t
+    print(time_array)
+    sys.exit()
+
+
+    h_complex = np.asarray(trimmed_strain_signal.data)
+    real_h_array = h_complex.real
+
+    dpi = 100
+    figsize_inches = (width / dpi, height / dpi)
+
+    # Create the figure and axes
+    fig, ax = plt.subplots(figsize=figsize_inches, dpi=dpi)
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
+
+    # Plot the full waveform in the background for context
+    ax.plot(time_array, real_h_array, color=(0.95, 0.85, 0.95), alpha=0.5, linewidth=1.0)
+
+    # Plot the "live" part of the waveform up to the current frame
+    current_time_idx = anim_time_indices[current_frame_index]
+    live_time = time_array[:current_time_idx + 1]
+    live_strain = real_h_array[:current_time_idx + 1]
+    ax.plot(live_time, live_strain, color='cyan', linewidth=1.5)
+
+    # Add a vertical "now" line
+    ax.axvline(x=live_time[-1], color='red', linestyle='--', linewidth=1.0, alpha=0.8)
+
+    y_min = real_h_array.min() * 1.1
+    y_max = real_h_array.max() * 1.1
+    ax.set_xlim(time_array[0], time_array[-1])
+    ax.set_ylim(y_min, y_max)
+
+    # Remove all chart junk (ticks, labels, spines) for a clean look
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+
+    # Ensure there is no padding around the plot
+    fig.tight_layout(pad=0)
+
+    # --- Rendering to NumPy array ---
+    # Draw the canvas and get the RGB buffer
+    fig.canvas.draw()
+    buffer_rgb = fig.canvas.buffer_rgba()
+    # Convert the buffer to a NumPy array of the correct shape
+    plot_array = np.asarray(buffer_rgb)[:, :, :3]
+    # Close the figure to free up memory, crucial for running in a loop
+    plt.close(fig)
+
+    return plot_array
 
 
 def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20):
@@ -263,7 +219,6 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20):
     all_coords_over_time = [A_coords_data, B_coords_data, C_coords_data]
     all_radii_over_time = [A_rad_data, B_rad_data, C_rad_data]
     surfaces_along_time = [[], [], []] # To store [(x,y,z)_t0, (x,y,z)_t1, ...] for each BH
-    sheen_surfaces = [[], [], []]
 
     # --- Pre-calculate unit sphere points ---
     # These define the SHAPE of the sphere. They are 2D arrays.
@@ -305,17 +260,13 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20):
             x_surface = current_center[0] + current_radius * x_unit_sphere
             y_surface = current_center[1] + current_radius * y_unit_sphere
             z_surface = current_center[2] + current_radius * z_unit_sphere
-            sheen_x = current_center[0] + current_radius * 1.02 * x_unit_sphere
-            sheen_y = current_center[1] + current_radius * 1.02 * y_unit_sphere
-            sheen_z = current_center[2] + current_radius * 1.02 * z_unit_sphere
             # x_surface, y_surface, z_surface are now 2D arrays of shape (n_theta_bh, n_phi_bh)
 
             surfaces_along_time[i].append((x_surface, y_surface, z_surface))
-            sheen_surfaces[i].append((sheen_x, sheen_y, sheen_z))
             
     omega_orbit = horizons_obj.omega
 
-    return surfaces_along_time, sheen_surfaces, chi_arrays_to_plot, chi_max, omega_orbit
+    return surfaces_along_time, chi_arrays_to_plot, chi_max, omega_orbit
 
 
 def generate_adaptive_r_coords(
@@ -358,7 +309,7 @@ def generate_adaptive_r_coords(
     while current_r < r_max:
         retarded_time = np.array([lab_time_t - current_r])
 
-        if retarded_time[0] > (1.05 * peak_strain_t):
+        if retarded_time[0] > (1.07 * peak_strain_t):
             delta_r = max_r_step / 3
 
         elif retarded_time[0] > (1.02 * peak_strain_t):
@@ -546,20 +497,19 @@ def create_merger_movie():
     strain_modes_sxs, psi4_modes_sxs, horizons_data = load_simulation_data(SXS_ID)
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
+    start_back_prop = 0.2 # fraction of total sim time to go back from peak strain for the start
+    end_for_prop = 0.15 # fraction of total sim time to go forwards from peak strain for the end
 
+    dom_l, dom_m = 2, 2
+    h_lm_signal = strain_modes_sxs[:, strain_modes_sxs.index(dom_l, dom_m)]
+    
+    # Ideally we wouldn't be interpolating and would just use the closest sim sample time
+    # HOWEVER: the horizon and waveform data are sampled at completely different timesteps (smart)
+    # so this is where we're at. Would still be good to at least avoid interpolating the waveform data, add later
     peak_strain_time = strain_modes_sxs.max_norm_time()
-    sim_start_time = strain_modes_sxs.t[0]
-    sim_end_time = strain_modes_sxs.t[-1]
-    sim_total_time = sim_end_time - sim_start_time
-    anim_start_time = peak_strain_time - (0.2 * sim_total_time)
-    anim_end_time = (0.13 * sim_total_time) + peak_strain_time
-    anim_start_time = max(anim_start_time, sim_start_time)
-    anim_end_time = min(anim_end_time, sim_end_time)
-    anim_lab_times = np.linspace(
-        anim_start_time,
-        anim_end_time,
-        NUM_FRAMES, endpoint=True
-    )
+    sample_times = strain_modes_sxs.t
+    
+    anim_lab_times, anim_time_indices = pseudo_uniform_times(sample_times, peak_strain_time, start_back_prop, end_for_prop)
 
     print(f"Animation time: {anim_lab_times[0]:.2f}M to {anim_lab_times[-1]:.2f}M over {len(anim_lab_times)} frames.")
 
@@ -570,7 +520,7 @@ def create_merger_movie():
     mlab.figure(size=(1280, 1024), bgcolor=BG_COLOR)
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
-    bh_surfs, sheen_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times)
+    bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times)
     spin_arrow_size *= 8
 
     frame_files = []
@@ -579,35 +529,6 @@ def create_merger_movie():
 
     total_physical_anim_time = anim_lab_times[-1] - anim_lab_times[0]
     if total_physical_anim_time == 0: total_physical_anim_time = 1.0 # Avoid division by zero
-
-    # Coords for psi4 glyph visualization
-    R_min = 10.0
-    R_max = 30.0
-    num_radial_shells = 6 # Number of concentric shells
-    num_theta_glyphs = 6
-    num_phi_glyphs = 12
-
-    # Array of radii for our shells
-    glyph_radii = np.linspace(R_max, R_min, num_radial_shells)
-    glyph_thetas = np.linspace(0, np.pi, num_theta_glyphs)
-    glyph_phis = np.linspace(0, 2*np.pi, num_phi_glyphs)
-    R_GLYPH_MESH, THETA_GLYPH_MESH, PHI_GLYPH_MESH = np.meshgrid(glyph_radii, glyph_thetas, glyph_phis)
-    X_GLYPH_MESH = R_GLYPH_MESH * np.cos(PHI_GLYPH_MESH) * np.sin(THETA_GLYPH_MESH)
-    Y_GLYPH_MESH = R_GLYPH_MESH * np.sin(PHI_GLYPH_MESH) * np.sin(THETA_GLYPH_MESH)
-    Z_GLYPH_MESH = R_GLYPH_MESH * np.cos(THETA_GLYPH_MESH)
-
-    progress_circle_actors = None 
-    # Parameters for the progress circle (can be defined once if static)
-    circle_display_params = {
-        "diameter_pixels": 160,
-        "center_norm_coords": (0.145, 0.98), 
-        "color": (0.95, 0.85, 0.95), # Light purple
-        "outline_thickness": 2
-    }
-    no_circle_display_params = {
-        "center_norm_coords": (-1, 2), 
-        "color": BG_COLOR, # same as background
-    }
 
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
@@ -642,26 +563,20 @@ def create_merger_movie():
         if current_lab_time < common_horizon_start:
             # plot BH1
             mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
-            spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1')
+            spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR,
+                        line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1')
             # plot BH2
             mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 2')
-            spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2')
+            spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR,
+                        line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2')
         else:
             # plot merged BH
             mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
-            spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3')
+            spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR,
+                        line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3')
 
 
         mlab.view(azimuth=30, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,0))
-
-        # Make progress circle same color as background and move way out of frame
-        progress_circle_actors = update_or_create_progress_circle(
-           scene=current_scene,
-           current_frame=i_frame, 
-           total_frames=NUM_FRAMES, 
-           circle_actors=progress_circle_actors,
-           **no_circle_display_params # Pass display parameters
-        )
 
         pip_arr_large = mlab.screenshot(antialiased=True)
         if current_lab_time < common_horizon_start:
@@ -670,32 +585,13 @@ def create_merger_movie():
         else:
             spin3_obj.remove()
 
-
         # plot GW surface
         mlab.mesh(X_GW_SURF, Y_GW_SURF, z_gw_frame,
                         scalars=GW_color_scalars, colormap='winter',
                         representation = representation_str,
                         name="GW h+ Surface", opacity=0.75)
 
-        # plot psi4 effects on glyph grid
-        psi4_grid_scalars = reconstruct_psi4_on_3D_grid_at_t(psi4_modes_sxs,
-                                                             current_lab_time,
-                                                             glyph_radii,
-                                                             THETA_GLYPH_MESH,
-                                                             PHI_GLYPH_MESH)
-        mlab.points3d(X_GLYPH_MESH, Y_GLYPH_MESH, Z_GLYPH_MESH, psi4_grid_scalars,
-                      colormap='autumn', scale_mode='scalar', opacity=0.75,
-                      scale_factor=30)
-
         mlab.view(azimuth=30, elevation=60, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
-        # <<<< PROGRESS CIRCLE UPDATE >>>>
-        progress_circle_actors = update_or_create_progress_circle(
-           scene=current_scene,
-           current_frame=i_frame, 
-           total_frames=NUM_FRAMES, 
-           circle_actors=progress_circle_actors,
-           **circle_display_params # Pass display parameters
-        )
 
         main_arr = mlab.screenshot(antialiased=True)
 
@@ -704,7 +600,15 @@ def create_merger_movie():
         new_pip_h, new_pip_w = int(orig_pip_h / PIP_SCALE), int(orig_pip_w / PIP_SCALE)
         pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
         # Paste the resized PiP array onto the main array
+        
         main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
+
+        progress_plot_w, progress_plot_h = int(orig_pip_w / PROGRESS_WAVE_SCALE), int(orig_pip_h // PROGRESS_WAVE_SCALE)
+        progress_plot_array = make_progress_signal_plot(h_lm_signal, anim_lab_times, anim_time_indices, i_frame,
+                                                       progress_plot_w, progress_plot_h, BG_COLOR)
+        h_buff = w_buff = 10
+        main_arr[h_buff:(progress_plot_h + h_buff), w_buff:(progress_plot_w + w_buff)] = progress_plot_array
+
 
         frame_filename = f"{frames_dir_path}/frame_{i_frame:04d}.png"
         combined_frame = cv2.cvtColor(main_arr, cv2.COLOR_RGB2BGR)
