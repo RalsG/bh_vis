@@ -25,9 +25,10 @@ FPS = 24
 # GW Surface Visualization Parameters
 MAX_R_STEP = 40.0 # In units of M for the adaptive grid sampling.
 MIN_R_STEP = 0.7
-PEAK_POINTS_PER_WAVE = 20.0 # Higher means more compute but smoother surface waves
+POINTS_PER_WAVE = 20.0 # Higher means more compute but smoother surface waves
 MIN_R_GW = 12.0
 MAX_R_GW = 800.0
+NUM_PHI_GW = 500
 AMPLITUDE_SCALE = 0.45 * MAX_R_GW # Factor to scale h+ for z-displacement (TUNE THIS!)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.4, 0.4, 0.4)
@@ -50,16 +51,12 @@ def load_simulation_data(sxs_id_str):
     strain_modes = getattr(simulation, 'h', None)
     if strain_modes is not None: print(f"strain modes loaded. Time range: {strain_modes.t[0]:.2f}M to {strain_modes.t[-1]:.2f}M.")
     else: raise ValueError(f"Strain not found or empty for simulation {sxs_id_str}.")
-
-    psi4_modes = getattr(simulation, 'h', None)
-    if psi4_modes is not None: print(f"Psi4 modes loaded. Time range: {psi4_modes.t[0]:.2f}M to {psi4_modes.t[-1]:.2f}M.")
-    else: raise ValueError(f"Psi4 not found or empty for simulation {sxs_id_str}.")
     
     horizons_data = getattr(simulation, 'horizons', None)
     if horizons_data is not None: print("Horizons data loaded.")
     else: print(f"Warning: horizons not found or empty for simulation {sxs_id_str}.")
 
-    return strain_modes, psi4_modes, horizons_data
+    return strain_modes, horizons_data
 
 def pseudo_uniform_times(
         sample_times: np.ndarray,
@@ -95,12 +92,7 @@ def make_progress_signal_plot(dom_mode_signal: sxs.waveforms.WaveformModes,
                             bg_color: tuple[float, float, float]
 ):
     trimmed_strain_signal = dom_mode_signal[anim_time_indices[0]:(anim_time_indices[-1] + 1)]
-    print(len(dom_mode_signal), len(trimmed_strain_signal))
-    print(dom_mode_signal)
-    print(trimmed_strain_signal)
     time_array = trimmed_strain_signal.t
-    print(time_array)
-    sys.exit()
 
 
     h_complex = np.asarray(trimmed_strain_signal.data)
@@ -118,9 +110,10 @@ def make_progress_signal_plot(dom_mode_signal: sxs.waveforms.WaveformModes,
     ax.plot(time_array, real_h_array, color=(0.95, 0.85, 0.95), alpha=0.5, linewidth=1.0)
 
     # Plot the "live" part of the waveform up to the current frame
+    start_time_idx = anim_time_indices[0]
     current_time_idx = anim_time_indices[current_frame_index]
-    live_time = time_array[:current_time_idx + 1]
-    live_strain = real_h_array[:current_time_idx + 1]
+    live_time = time_array[:(current_time_idx - start_time_idx + 1)]
+    live_strain = real_h_array[:(current_time_idx - start_time_idx + 1)]
     ax.plot(live_time, live_strain, color='cyan', linewidth=1.5)
 
     # Add a vertical "now" line
@@ -270,14 +263,15 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20):
 
 
 def generate_adaptive_r_coords(
+    r_axis: np.ndarray,
     angular_velocity_ts: sxs.TimeSeries,
     lab_time_t: float,
-    peak_strain_t: float,
+    lab_time_step: float,
     r_min: float,
     r_max: float,
     max_r_step: float = 40.0,
-    min_r_step: float = 1.0,
-    peak_samples_per_wave = 20.0
+    min_r_step: float = 0.5,
+    samples_per_wavelength = 20.0
 ) -> np.ndarray:
     """
     Generates a non-uniform radial grid by adapting to the local spatial
@@ -294,9 +288,18 @@ def generate_adaptive_r_coords(
     Returns:
         A 1D numpy array of non-uniformly spaced radial coordinates.
     """
-    r_points = [r_min]
-    current_r = r_min
-    samples_per_wavelength = peak_samples_per_wave/2
+    if r_axis is not None:
+        temp = np.searchsorted(r_axis, r_max - lab_time_step, side='left')
+        r_points = r_axis[:temp] + lab_time_step
+        num_chopped = len(r_axis) - temp
+        print(num_chopped)
+        if r_points[-1] < r_max:
+           r_points = np.append(r_points, [r_max])
+        r_max = r_points[0]
+    else:
+        r_points = np.array([r_max])
+        num_chopped = 0
+    current_r = r_max
 
     # Create an interpolator for the angular velocity for efficiency.
     # This is much faster than recreating it inside the loop.
@@ -306,86 +309,88 @@ def generate_adaptive_r_coords(
     # during the very early, slow inspiral.
     min_omega_gw = 2*np.pi / (max_r_step * samples_per_wavelength)
 
-    while current_r < r_max:
+    while current_r > r_min:
         retarded_time = np.array([lab_time_t - current_r])
 
-        if retarded_time[0] > (1.07 * peak_strain_t):
-            delta_r = max_r_step / 3
+        try:
+            omega_orb = ang_vel_interp(retarded_time).data[0]
+            # The dominant GW frequency is twice the orbital frequency.
+            omega_gw = 2.0 * omega_orb
 
-        elif retarded_time[0] > (1.02 * peak_strain_t):
-            delta_r = min_r_step*4
+        except ValueError:
+            # If time is out of bounds, use the minimum frequency to step through.
+            omega_gw = min_omega_gw
 
-        elif retarded_time[0] > (0.98 * peak_strain_t):
-            delta_r = min_r_step
+        # Ensure frequency is not zero to avoid division by zero.
+        omega_gw = max(omega_gw, min_omega_gw)
 
-        else:
-            if retarded_time[0] > (0.5 * peak_strain_t):
-                samples_per_wavelength = peak_samples_per_wave * (retarded_time[0] / peak_strain_t)
-
-            try:
-                omega_orb = ang_vel_interp(retarded_time).data[0]
-
-                # The dominant GW frequency is twice the orbital frequency.
-                omega_gw = 2.0 * omega_orb
-
-            except ValueError:
-                # If time is out of bounds, use the minimum frequency to step through.
-                omega_gw = min_omega_gw
-
-            # Ensure frequency is not zero to avoid division by zero.
-            omega_gw = max(omega_gw, min_omega_gw)
-
-            # Calculate the desired step size. The spatial wavelength of the
-            # wave is (2*pi / omega_gw). We sample this wavelength N times.
-            spatial_wavelength = 2.0 * np.pi / omega_gw
-            delta_r = spatial_wavelength / samples_per_wavelength
-            if delta_r < min_r_step:
-                print(f"it's getting gritty at {retarded_time[0]}")
-                delta_r = min_r_step
-
+        # Calculate the desired step size. The spatial wavelength of the
+        # wave is (2*pi / omega_gw). We sample this wavelength N times.
+        spatial_wavelength = 2.0 * np.pi / omega_gw
+        delta_r = spatial_wavelength / samples_per_wavelength
+        delta_r = max(delta_r, min_r_step)
         # Advance the current radius
-        current_r += delta_r
+        current_r -= delta_r
         
         # Append the new point, but avoid overshooting the boundary.
-        if current_r < r_max:
-            r_points.append(current_r)
+        if current_r > r_min:
+            r_points = np.insert(r_points, 0, current_r)
         else:
             break
 
-    # Ensure the last point is exactly r_max for a clean boundary.
-    if r_points[-1] < r_max:
-        r_points.append(r_max)
-
-    r_points_out = np.flip(np.array(r_points))
-    return r_points_out
+    # Ensure the last point is exactly r_min for a clean boundary.
+    if r_points[0] > r_min:
+        r_points = np.insert(r_points, 0, r_min)
+    
+    return r_points, num_chopped
 
 
 def reconstruct_hplus_on_xy_plane_at_time_t(
+    old_z_grid: np.ndarray,
+    old_color_scalars: np.ndarray,
     sxs_strain_modes: sxs.waveforms.WaveformModes,
     lab_time_t: float,
+    num_points_chopped: float,
     r_coords: np.ndarray,
     phi_coords: np.ndarray,
     spin_weight: int = -2
 ):
     """
-    Reconstructs h+ on a specified x-y polar grid at a given lab time.
-    Returns a 2D array for z-displacement (scaled h+).
+    Reconstructs h_+ and h_x on a specified x-y polar grid at a given lab time.
+    Returns a 2D array for z-displacement (scaled h_+) and surface color (scaled h_x).
     Shape will be (len(r_coords), len(phi_coords)).
+    Now takes in old strain arrays and steps them forward in time
     """
-    z_displacement_grid = np.zeros((len(r_coords), len(phi_coords)))
-    color_scalars = np.zeros((len(r_coords), len(phi_coords)))
+    if old_z_grid is not None:
+        buffer_size = len(r_coords) - len(old_z_grid) + num_points_chopped
+        grid_buffer = np.zeros((buffer_size, len(old_z_grid[0])))
+        z_displacement_grid = np.concatenate((grid_buffer, old_z_grid[:-num_points_chopped]), axis=0)
+        print(grid_buffer.shape)
+        color_scalars = np.concatenate((grid_buffer, old_color_scalars[:-num_points_chopped]), axis=0)
+        r_coords_for_eval = r_coords[:buffer_size]
+        print(len(r_coords_for_eval), len(phi_coords))
+
+    else:
+        z_displacement_grid = np.zeros((len(r_coords), len(phi_coords)))
+        color_scalars = np.zeros((len(r_coords), len(phi_coords)))
+        r_coords_for_eval = r_coords
 
     # --- Vectorized Interpolation ---
     # Create a 1D array of all unique retarded times needed.
-    # This is the core optimization.
-    retarded_times_vec = np.asarray(lab_time_t - r_coords)
+    # r_coords parameter should be INCREASING
+    r_coords_flipped = np.flip(r_coords_for_eval)
+    retarded_times_vec = np.asarray(lab_time_t - r_coords_flipped)
+
     # Times must be strictly INCREASING
 
     # try:
     # Perform one single, fast interpolation for all radii at once.
+    temp_time = time.time()
     strain_modes_at_times_obj = sxs_strain_modes.interpolate(retarded_times_vec)
+    print(f"interpolation took {(time.time() - temp_time):.2f}s")
     # h_coeffs_matrix will have shape (len(r_coords), n_modes)
-    h_coeffs_matrix = strain_modes_at_times_obj.data
+    h_coeffs_matrix_flipped = strain_modes_at_times_obj.data
+    h_coeffs_matrix = np.flip(h_coeffs_matrix_flipped, axis=0)
     """except ValueError:
         print(f"Out of bounds at lab time {lab_time_t}")
         sys.exit()
@@ -399,13 +404,19 @@ def reconstruct_hplus_on_xy_plane_at_time_t(
     theta_for_evaluation = np.full_like(phi_coords, theta_val_equator)
     # Convert spherical coordinates to quaternions (rotors).
     # This creates an array of quaternion objects, one for each (phi, theta) point.
+    temp_time = time.time()
     rotors_for_evaluation = quaternionic.array.from_spherical_coordinates(theta_for_evaluation, phi_coords)
-    
+    print(f"making quaternions took {(time.time() - temp_time):.2f}s")
+
+
     ell_min, ell_max = sxs_strain_modes.ell_min, sxs_strain_modes.ell_max
+
+    sph_modes_time_sum = 0
+    sph_eval_time_sum = 0
 
     # Now, loop through the results of the interpolation. This loop is much faster
     # because the expensive part (interpolation) is already done.
-    for i in range(len(r_coords)):
+    for i in range(len(r_coords_for_eval)):
         # Get the row of coefficients for the i-th radius
         h_coeffs_for_this_r = h_coeffs_matrix[i, :]
         
@@ -416,89 +427,38 @@ def reconstruct_hplus_on_xy_plane_at_time_t(
             color_scalars[i, :] = 0.0
             continue
             
+        temp_time = time.time()    
         sph_modes_obj = spherical.Modes(
             h_coeffs_for_this_r,
             spin_weight=spin_weight,
             ell_min=ell_min,
             ell_max=ell_max
         )
+        sph_modes_time_sum += time.time() - temp_time
 
+        temp_time = time.time() 
         complex_strain_values_at_r = sph_modes_obj.evaluate(rotors_for_evaluation)
         # Could simply use the scri.WaveformModes.to_grid() method and avoid quaternions,
         # but that creates the whole spherical grid and we only need a ring
+        sph_eval_time_sum += time.time() - temp_time
 
         z_displacement_grid[i, :] = complex_strain_values_at_r.real * AMPLITUDE_SCALE
         color_scalars[i, :] = complex_strain_values_at_r.imag
 
+    print(f"making spherical.Modes object took {sph_modes_time_sum:.2f}s")
+    print(f"evaluating SWSHs took {sph_eval_time_sum:.2f}s")
+
     return z_displacement_grid, color_scalars
-
-
-def reconstruct_psi4_on_3D_grid_at_t(
-    sxs_psi4_modes: sxs.waveforms.WaveformModes,
-    lab_time_t: float,
-    r_coords: np.ndarray,
-    theta_grid: np.ndarray,
-    phi_grid: np.ndarray,
-    spin_weight: int = -2
-):
-    """
-    Evaluates psi4.real on a 3D Cartesian grid at a given lab time.
-    Returns a 3D array for scaling glyphs at those points, shape (len(x_coords), len(y_coords), len(z_coords))
-    """
-    theta_coords = theta_grid[:, 0, :].flatten()
-    phi_coords = phi_grid[0, :, :].flatten()
-    num_r, num_theta, num_phi = theta_grid.shape
-
-    force_grid = np.zeros((num_r, num_theta, num_phi))
-    # --- Vectorized Interpolation ---
-    # Create a 1D array of all unique retarded times needed.
-    # This is the core optimization.
-    retarded_times_vec = np.asarray(lab_time_t - r_coords)
-    # Times must be strictly INCREASING
-
-    # Perform one single, fast interpolation for all radii at once.
-    psi4_modes_at_times_obj = sxs_psi4_modes.interpolate(retarded_times_vec)
-    # h_coeffs_matrix will have shape (len(r_coords), n_modes)
-    psi4_coeffs_matrix = psi4_modes_at_times_obj.data
-
-    rotors_for_evaluation = quaternionic.array.from_spherical_coordinates(theta_coords, phi_coords)
-    ell_min, ell_max = sxs_psi4_modes.ell_min, sxs_psi4_modes.ell_max
-
-    for i in range(len(r_coords)):
-        # Get the row of coefficients for the i-th radius
-        psi4_coeffs_for_this_r = psi4_coeffs_matrix[i, :]
-        
-        if np.all(psi4_coeffs_for_this_r == 0):
-            # This can happen if the interpolation returned zeros for out-of-bounds times
-            # that were handled internally by sxs.
-            force_grid[i, :] = 0.0
-            continue
-            
-        sph_modes_obj = spherical.Modes(
-            psi4_coeffs_for_this_r,
-            spin_weight=spin_weight,
-            ell_min=ell_min,
-            ell_max=ell_max
-        )
-
-        complex_psi4_values_at_r = sph_modes_obj.evaluate(rotors_for_evaluation)
-        real_psi4_values_at_r = complex_psi4_values_at_r.real
-        # Could simply use the scri.WaveformModes.to_grid() method and avoid quaternions,
-        # but that creates the whole spherical grid and we only need a ring
-
-        force_grid[i, :, :] = real_psi4_values_at_r.reshape(num_theta, num_phi)
-
-    return force_grid
 
 
 # --- Main Animation Logic ---
 def create_merger_movie():
     script_init_time = time.time()
-    strain_modes_sxs, psi4_modes_sxs, horizons_data = load_simulation_data(SXS_ID)
+    strain_modes_sxs, horizons_data = load_simulation_data(SXS_ID)
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
-    start_back_prop = 0.2 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.15 # fraction of total sim time to go forwards from peak strain for the end
+    start_back_prop = 0.1 # fraction of total sim time to go back from peak strain for the start
+    end_for_prop = 0.05 # fraction of total sim time to go forwards from peak strain for the end
 
     dom_l, dom_m = 2, 2
     h_lm_signal = strain_modes_sxs[:, strain_modes_sxs.index(dom_l, dom_m)]
@@ -514,8 +474,7 @@ def create_merger_movie():
     print(f"Animation time: {anim_lab_times[0]:.2f}M to {anim_lab_times[-1]:.2f}M over {len(anim_lab_times)} frames.")
 
     common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
-    print(common_horizon_start)
-    print(peak_strain_time)
+    phi_gw_axis = np.linspace(0, 2 * np.pi, NUM_PHI_GW, endpoint=True)
 
     mlab.figure(size=(1280, 1024), bgcolor=BG_COLOR)
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
@@ -533,33 +492,37 @@ def create_merger_movie():
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
     r_points_sum = 0
+    r_gw_axis = None
+    z_gw_frame = None
+    GW_color_scalars = None
 
     for i_frame, current_lab_time in enumerate(anim_lab_times):
-
         frame_render_start_time = time.time()
         if not auto_loop_bool:
             print(f"Processing frame {i_frame+1}/{NUM_FRAMES} for lab_time = {current_lab_time:.2f} M")
+        
+        lab_time_step = current_lab_time - anim_lab_times[i_frame - 1] # It will be the whole animation time on frame 0, but is not used then
 
-        r_gw_axis = generate_adaptive_r_coords(orbital_vel_t, current_lab_time,
-                                               peak_strain_time, MIN_R_GW,
-                                               MAX_R_GW, MAX_R_STEP, MIN_R_STEP, PEAK_POINTS_PER_WAVE)
+        temp_time = time.time()
+        r_gw_axis, num_points_chopped = generate_adaptive_r_coords(r_gw_axis, orbital_vel_t, current_lab_time,
+                                               lab_time_step, MIN_R_GW,
+                                               MAX_R_GW, MAX_R_STEP, MIN_R_STEP, POINTS_PER_WAVE)
         num_r_points = len(r_gw_axis)
         r_points_sum += num_r_points
-        phi_gw_axis = np.linspace(0, 2 * np.pi, num_r_points, endpoint=True)
         PHI_GW_MESH, R_GW_MESH = np.meshgrid(phi_gw_axis, r_gw_axis)
         X_GW_SURF = R_GW_MESH * np.cos(PHI_GW_MESH)
         Y_GW_SURF = R_GW_MESH * np.sin(PHI_GW_MESH)
-
+        print(f"Making and meshing a grid took {(time.time() - temp_time):.2f}s")
+        
+        temp_time = time.time()
         z_gw_frame, GW_color_scalars = reconstruct_hplus_on_xy_plane_at_time_t(
-            strain_modes_sxs, current_lab_time, r_gw_axis, phi_gw_axis
-        )
+            z_gw_frame, GW_color_scalars, strain_modes_sxs, current_lab_time,
+            num_points_chopped, r_gw_axis, phi_gw_axis)
+        print(f"whole function for making surface data took {(time.time() - temp_time):.2f}s")
 
         mlab.clf()
-        current_scene = mlab.gcf().scene 
-        if not current_scene or not current_scene.renderer:
-            print(f"Error: Could not get valid Mayavi scene/renderer for frame {i_frame}. Skipping.")
-            continue
         
+        temp_time = time.time()
         if current_lab_time < common_horizon_start:
             # plot BH1
             mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
@@ -574,7 +537,7 @@ def create_merger_movie():
             mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
             spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR,
                         line_width = 0.7*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3')
-
+        print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
 
         mlab.view(azimuth=30, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,0))
 
@@ -586,33 +549,33 @@ def create_merger_movie():
             spin3_obj.remove()
 
         # plot GW surface
+        temp_time = time.time()
         mlab.mesh(X_GW_SURF, Y_GW_SURF, z_gw_frame,
                         scalars=GW_color_scalars, colormap='winter',
                         representation = representation_str,
-                        name="GW h+ Surface", opacity=0.75)
+                        name="GW h+ Surface", opacity=0.9)
+        print(f"rendering GW surface took {(time.time() - temp_time):.2f}s")
 
         mlab.view(azimuth=30, elevation=60, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
-
         main_arr = mlab.screenshot(antialiased=True)
-
+        temp_time = time.time()
         # Resize PiP image
         orig_pip_h, orig_pip_w, _ = pip_arr_large.shape
         new_pip_h, new_pip_w = int(orig_pip_h / PIP_SCALE), int(orig_pip_w / PIP_SCALE)
         pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
         # Paste the resized PiP array onto the main array
-        
         main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
-
         progress_plot_w, progress_plot_h = int(orig_pip_w / PROGRESS_WAVE_SCALE), int(orig_pip_h // PROGRESS_WAVE_SCALE)
         progress_plot_array = make_progress_signal_plot(h_lm_signal, anim_lab_times, anim_time_indices, i_frame,
                                                        progress_plot_w, progress_plot_h, BG_COLOR)
         h_buff = w_buff = 10
         main_arr[h_buff:(progress_plot_h + h_buff), w_buff:(progress_plot_w + w_buff)] = progress_plot_array
-
-
+        print(f"slicing arrays and making the progress plot took {(time.time() - temp_time):.2f}s")
+        temp_time = time.time()
         frame_filename = f"{frames_dir_path}/frame_{i_frame:04d}.png"
         combined_frame = cv2.cvtColor(main_arr, cv2.COLOR_RGB2BGR)
         cv2.imwrite(frame_filename, combined_frame)
+        print(f"saving frame took {(time.time() - temp_time):.2f}s")
 
         frame_files.append(frame_filename)
         if not auto_loop_bool:
