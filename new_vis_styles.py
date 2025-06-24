@@ -2,6 +2,7 @@ import numpy as np
 import sxs
 from mayavi import mlab
 import matplotlib.pyplot as plt
+from matplotlib import cm
 import imageio.v2 as imageio # clarification
 import cv2
 import os
@@ -17,17 +18,17 @@ sxs_idx_start = 308
 loop_size = 4
 representation_str = 'surface'
 NUM_FRAMES = 300
-FPS = 20
-timing_bool = False
+FPS = 24
+timing_bool = True
 
 # GW Surface Visualization Parameters
 MAX_R_STEP = 10.0 # In units of M for the adaptive grid sampling.
 MIN_R_STEP = 0.05
 POINTS_PER_WAVE = 20.0 # Higher means more compute but smoother surface waves
-MIN_R = 10.
-MAX_R = 100.
-NUM_R = 40
-NUM_PHI = 40
+MIN_R = 20.
+MAX_R = 150.
+NUM_R = 60
+NUM_PHI = 100
 NUM_THETA = NUM_PHI//2
 STRAIN_SCALE = 0.45 * MAX_R # Factor to scale h+ for z-displacement (TUNE THIS!)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
@@ -36,7 +37,7 @@ SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
 
 
 PIP_CAMERA_DISTANCE = 30
-MAIN_CAMERA_DISTANCE = MAX_R * 3.
+MAIN_CAMERA_DISTANCE = MAX_R * 3.6
 BH_ELEVATION = 0 # Set 0 or a positive float to have the BHs rotate above the strain surface
 PIP_SCALE = 4.0 # This is the ratio of window to PiP
 PROGRESS_WAVE_SCALE = 8 # ratio of window to progress waveform
@@ -259,23 +260,21 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20, bh_ele
             # x_surface, y_surface, z_surface are now 2D arrays of shape (n_theta_bh, n_phi_bh)
 
             surfaces_along_time[i].append((x_surface, y_surface, z_surface))
-            
     omega_orbit = horizons_obj.omega
 
     return surfaces_along_time, chi_arrays_to_plot, chi_max, omega_orbit
 
 
-def generate_3d_grid(num_r, r_min, r_max, num_theta, num_phi) -> np.ndarray:
+def generate_thinned_3d_grid(num_r, r_min, r_max, num_theta, num_phi) -> np.ndarray:
     r_axis = np.linspace(r_min, r_max, num_r)
-    theta_axis = np.linspace(0, np.pi, num_theta)
-    phi_axis = np.linspace(0, 2*np.pi, num_phi)
+    theta_axis = np.linspace(np.pi/num_theta, ((num_theta - 1)/num_theta * np.pi), num_theta)
+    phi_axis = np.linspace(0, 2*np.pi, num_phi, endpoint=False)
     r_grid, theta_grid, phi_grid = np.meshgrid(r_axis, theta_axis, phi_axis, indexing='ij')
-    print(r_grid, theta_grid, phi_grid)
 
     """# Thin out the grid closer to the center
-    r_grid_out = np.array()
-    theta_grid_out = np.array()
-    phi_grid_out = np.array()
+    r_grid_out = np.array([[]])
+    theta_grid_out = np.array([[]])
+    phi_grid_out = np.array([[]])
 
     for i, r in enumerate(r_axis):
         if r == 0:
@@ -285,7 +284,79 @@ def generate_3d_grid(num_r, r_min, r_max, num_theta, num_phi) -> np.ndarray:
         np.append(r_grid_out, r_grid[i, ::scale_diff_slice, ::scale_diff_slice], axis=0)
         np.append(theta_grid_out, theta_grid[i, ::scale_diff_slice, ::scale_diff_slice], axis=0)
         np.append(phi_grid_out, phi_grid[i, ::scale_diff_slice, ::scale_diff_slice], axis=0)"""
-    return r_axis, r_grid, theta_grid, phi_grid
+
+    return r_grid, theta_grid, phi_grid
+
+
+def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
+                  r_grid: np.ndarray, theta_grid: np.ndarray, phi_grid: np.ndarray):
+    temp_time = time.time()
+    """# Step 1: Same as before
+    og_shape = r_grid.shape
+    ret_times_flat = (lab_time_t - r_grid).ravel()
+    unique_times, inverse_indices = np.unique(ret_times_flat, return_inverse=True)
+
+    # Step 2: Interpolate for all unique times at once
+    h_lm_at_unique_times = strain_modes.interpolate(unique_times) # Shape: (U, num_modes)
+
+    # Step 3: Fan out coefficients to align with the flattened grid
+    # This is the key step that avoids the n^6 array
+    h_lm_for_each_grid_point = h_lm_at_unique_times.data[inverse_indices] # Shape: (n^3, num_modes)
+
+    # Step 4: Prepare flattened directions
+    directions_flat = np.transpose(np.array([theta_grid.ravel(), phi_grid.ravel()])) # Shape: (n^3, 2)
+
+    # Step 5: Evaluate in a single, aligned shot
+    # We create a temporary WaveformModes object to use the evaluate method.
+    # The time array here is just a placeholder, as the time-dependence is now baked into the coefficients.
+    print(h_lm_for_each_grid_point.shape)
+    temp_waveform = sxs.WaveformModes(
+        h_lm_for_each_grid_point, 
+        time=np.arange(len(h_lm_for_each_grid_point)),
+        modes_axis=1,
+        ell_min=strain_modes.ell_min,
+        ell_max=strain_modes.ell_max,
+        spin_weight=-2
+    )
+    waveform_evaluator = temp_waveform.evaluate
+    strain_values_flat = temp_waveform.evaluate(directions_flat) # Shape: (n^3,)
+
+    # Step 6: Reshape to the final grid shape
+    final_strain_grid = np.reshape(strain_values_flat, og_shape)"""
+
+    og_shape = r_grid.shape
+    ret_times_flat = (lab_time_t - r_grid).ravel()
+    unique_times, inverse_indices = np.unique(ret_times_flat, return_inverse=True)
+
+    # Step 2: Initialize output
+    final_strain_grid = np.zeros(og_shape)
+    final_strain_flat = final_strain_grid.ravel() # A flattened view for easy assignment
+
+    # Also flatten directions for easier indexing
+    flat_theta = theta_grid.ravel()
+    flat_phi = phi_grid.ravel()
+    strain_modes_interpolator = strain_modes.interpolate
+
+    # Step 3: Loop over unique times
+    for i, time_val in enumerate(unique_times):
+        # Interpolate modes ONCE for this time
+        strain_coeffs_at_time = strain_modes_interpolator([time_val])
+
+        # Find all grid points that need this evaluation
+        target_indices = np.where(inverse_indices == i)[0]
+
+        # Gather the directions for only those points
+        directions_for_this_time = np.array([flat_theta[target_indices], flat_phi[target_indices]]).T
+        
+        # Evaluate strain just for this group of points
+        strain_values = strain_coeffs_at_time.evaluate(directions_for_this_time)
+
+        # Place the results into the flattened output array
+        final_strain_flat[target_indices] = strain_values.real
+
+    print(f"that took {(time.time() - temp_time):.2f}s. yikes")
+    return final_strain_grid, np.min(final_strain_flat), np.max(final_strain_flat)
+
 
 def strain_in_3D(
         sxs_strain_modes: sxs.waveforms.WaveformModes,
@@ -302,72 +373,76 @@ def strain_in_3D(
 
     return sxs_strain_modes.evaluate(equiangular)
 
-def disturb_the_points(strain_grid, lab_time, r_grid, phi_grid, theta_grid, amplitude_scale: float = 10.) -> np.ndarray:
-    # Convert the base spherical grids to Cartesian
-    x_grid = r_grid * np.cos(phi_grid) * np.sin(theta_grid)
-    y_grid = r_grid * np.sin(phi_grid) * np.sin(theta_grid)
-    z_grid = r_grid * np.cos(theta_grid)
-    r_axis = r_grid[:, 0, 0]
 
-    ret_times_vec = np.asarray(lab_time - np.flip(r_grid[:, 0, 0]))
-    strain_interpolated_obj = strain_grid.interpolate(ret_times_vec)
+def vectorized_strain_evaluation(strain_in_directions: np.ndarray, lab_time_t: float,
+                                 r_grid: np.ndarray):
+    
+    ret_times_vec = np.asarray(lab_time_t - np.flip(r_grid[:, 0, 0]))
+    strain_interpolated_obj = strain_in_directions.interpolate(ret_times_vec)
     h_at_times = np.flip(np.asarray(strain_interpolated_obj), axis=0)
+    real_strain_grid = h_at_times.real
 
-    for r_idx, radius in enumerate(r_axis):
-        if radius == 0: # Avoid division by zero
-            continue
-        h_at_times[r_idx] = h_at_times[r_idx] / radius
+    return real_strain_grid, np.min(real_strain_grid), np.max(real_strain_grid)
 
-    # 1. Extract plus and cross polarizations from the complex strain object
-    h_plus = h_at_times.real
-    h_cross = h_at_times.imag
 
-    # 2. Calculate the Cartesian components of the local spherical basis vectors e_theta and e_phi
-    # These vectors form the basis of the transverse plane at each point.
-    ct, st = np.cos(theta_grid), np.sin(theta_grid)
-    cp, sp = np.cos(phi_grid), np.sin(phi_grid)
+def create_isosurface_lut(values_to_be_opaque, data_range,
+                          spike_width=5,
+                          spike_opacity=180,
+                          background_opacity=40,
+                          base_colormap='gist_rainbow'):
+    """
+    Generates a Mayavi LUT to simulate isosurfaces using opacity spikes.
 
-    e_theta_x, e_theta_y, e_theta_z = ct * cp,  ct * sp, -st
-    e_phi_x,   e_phi_y,   e_phi_z   = -sp,      cp,       0
+    Args:
+        isosurface_values (list or np.ndarray): 
+            The scalar values at which to create opaque "surfaces".
+        data_range (tuple): 
+            A tuple of (data_min, data_max) for the scalar field.
+        spike_width (int): 
+            The thickness of the opaque spike in LUT entries (e.g., 3 is 3/256ths of the data range).
+        spike_opacity (int): 
+            The opacity of the spikes (0-255).
+        background_opacity (int): 
+            The opacity of the rest of the volume (0-255).
+        base_colormap (str): 
+            The name of the matplotlib colormap to use for color.
 
-    # 3. Construct the polarization basis tensors e_plus_ij and e_cross_ij
-    # e_plus = e_theta ⊗ e_theta - e_phi ⊗ e_phi
-    # e_cross = e_theta ⊗ e_phi + e_phi ⊗ e_theta
-    e_plus_xx = e_theta_x**2 - e_phi_x**2
-    e_plus_yy = e_theta_y**2 - e_phi_y**2
-    e_plus_zz = e_theta_z**2 - e_phi_z**2
-    e_plus_xy = e_theta_x * e_theta_y - e_phi_x * e_phi_y
-    e_plus_xz = e_theta_x * e_theta_z - e_phi_x * e_phi_z
-    e_plus_yz = e_theta_y * e_theta_z - e_phi_y * e_phi_z
+    Returns:
+        np.ndarray: A 256x4 numpy array of uint8, suitable for a Mayavi LUT.
+    """
+    data_min, data_max = data_range
+    if data_min >= data_max:
+        raise ValueError("data_min must be less than data_max")
 
-    e_cross_xx = 2 * e_theta_x * e_phi_x
-    e_cross_yy = 2 * e_theta_y * e_phi_y
-    e_cross_zz = 2 * e_theta_z * e_phi_z
-    e_cross_xy = e_theta_x * e_phi_y + e_phi_x * e_theta_y
-    e_cross_xz = e_theta_x * e_phi_z + e_phi_x * e_theta_z
-    e_cross_yz = e_theta_y * e_phi_z + e_phi_y * e_theta_z
+    # 1. Get the base RGB values from a matplotlib colormap
+    # Matplotlib colormaps return RGBA in the 0.0-1.0 range
+    cmap_rgba = cm.get_cmap(base_colormap, 256)(np.arange(256))
+    
+    # Isolate RGB and convert to 0-255 uint8 format
+    lut_rgb = (cmap_rgba[:, :3] * 255).astype(np.uint8)
 
-    # 4. Construct the full strain tensor h_ij at each point
-    h_xx = h_plus * e_plus_xx + h_cross * e_cross_xx
-    h_yy = h_plus * e_plus_yy + h_cross * e_cross_yy
-    h_zz = h_plus * e_plus_zz + h_cross * e_cross_zz
-    h_xy = h_plus * e_plus_xy + h_cross * e_cross_xy
-    h_xz = h_plus * e_plus_xz + h_cross * e_cross_xz
-    h_yz = h_plus * e_plus_yz + h_cross * e_cross_yz
+    # 2. Create the opacity channel
+    lut_alpha = np.full(256, background_opacity, dtype=np.uint8)
 
-    # 5. Calculate the displacement vector using δx_i = 0.5 * h_ij * x_j
-    delta_x = amplitude_scale * (h_xx * x_grid + h_xy * y_grid + h_xz * z_grid)
-    delta_y = amplitude_scale * (h_xy * x_grid + h_yy * y_grid + h_yz * z_grid)
-    delta_z = amplitude_scale * (h_xz * x_grid + h_yz * z_grid + h_zz * z_grid)
+    # 3. & 4. Calculate and set the opacity spikes
+    for value in values_to_be_opaque:
+        if data_min <= value <= data_max:
+            # Map the data value to a LUT index (0-255)
+            index = int(255 * (value - data_min) / (data_max - data_min))
+            
+            # Define the start and end of the spike, clipping to the 0-255 range
+            half_width = spike_width // 2
+            start_index = np.clip(index - half_width, 0, 255)
+            end_index = np.clip(index + half_width + 1, 0, 256) # +1 for Python slicing
+            
+            # Set the high opacity spike
+            lut_alpha[start_index:end_index] = spike_opacity
+    
+    # 5. Combine RGB and Alpha into the final LUT
+    final_lut = np.c_[lut_rgb, lut_alpha]
+    
+    return final_lut
 
-    # 6. Apply the displacement to the Cartesian grid objects
-    x_grid = x_grid + delta_x
-    y_grid = y_grid + delta_y
-    z_grid = z_grid + delta_z
-
-    displacement_scalars = np.sqrt((delta_x ** 2) + (delta_y ** 2) + (delta_z ** 2))
-
-    return  x_grid, y_grid, z_grid, displacement_scalars
 
 # --- Main Animation Logic ---
 def create_merger_movie():
@@ -377,7 +452,7 @@ def create_merger_movie():
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
     start_back_prop = 0.2 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.05 # fraction of total sim time to go forwards from peak strain for the end
+    end_for_prop = 0.15 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
     common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
@@ -391,16 +466,28 @@ def create_merger_movie():
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
     r_axis = np.linspace(MIN_R, MAX_R, NUM_R)
-    theta_buffer = 1.2 * np.pi/(NUM_THETA)
-    theta_axis = np.linspace(theta_buffer, np.pi - theta_buffer, NUM_THETA)
-    phi_axis = np.linspace(0, 2*np.pi, NUM_PHI)
-    r_grid, theta_grid, phi_grid = np.meshgrid(r_axis, theta_axis, phi_axis, indexing='ij')
+    theta_axis = np.linspace(np.pi/NUM_THETA, ((NUM_THETA - 1)/NUM_THETA * np.pi), NUM_THETA)
+    phi_axis = np.linspace(0, 2*np.pi, NUM_PHI, endpoint=False)
+
+
+    r_grid, theta_grid, phi_grid = generate_thinned_3d_grid(NUM_R, MIN_R, MAX_R, NUM_THETA, NUM_PHI)
+    x_grid = r_grid * np.cos(phi_grid) * np.sin(theta_grid)
+    y_grid = r_grid * np.sin(phi_grid) * np.sin(theta_grid)
+    z_grid = r_grid * np.cos(theta_grid)
+
     temp_time = time.time()
-    strain_grid = strain_in_3D(strain_modes_sxs, phi_axis, theta_axis)
-    print(f"evaluating across all directions and times took {(time.time() - temp_time):.2f}s")
+    strain_starburst = strain_in_3D(strain_modes_sxs, phi_axis, theta_axis)
+    print(f"One-time evaluation across all times and directions took {(time.time() - temp_time):.2f}s")
+    temp_time = time.time()
+    _, min_strain, max_strain = vectorized_strain_evaluation(strain_starburst, peak_strain_time, r_grid)
+    print(f"Spherical grid vectorization took {(time.time() - temp_time):.2f}s")
+  
+
+    strain_values_to_isosurfaces = [0.75 * min_strain, 0.25*min_strain, 0.25*max_strain, 0.75 * max_strain]
+    isosurface_lut = create_isosurface_lut(strain_values_to_isosurfaces, (min_strain, max_strain))
 
     bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
-    spin_arrow_size *= 8
+    spin_arrow_size *= 7
 
     frame_files = []
     frames_dir_path = "frames" # Changed directory name as requested
@@ -449,10 +536,15 @@ def create_merger_movie():
             spin3_obj.remove()
 
         # plot points moving with strain
-        x_grid_for_plotting, y_grid_for_plotting, z_grid_for_plotting, displacement_scalars = disturb_the_points(
-            strain_grid, current_lab_time, r_grid, phi_grid, theta_grid, STRAIN_SCALE)
-        mlab.points3d(x_grid_for_plotting, y_grid_for_plotting, z_grid_for_plotting, -displacement_scalars,
-                      colormap='cool', opacity=0.4, scale_mode='none', scale_factor=0.5)
+        temp_time = time.time()
+        strain_grid, _, _ = vectorized_strain_evaluation(strain_starburst, current_lab_time, r_grid)
+        print(f"Evaluating strain took {(time.time()-temp_time):.2f}s")
+
+        temp_time = time.time()
+        point_cloud = mlab.points3d(x_grid, y_grid, z_grid, strain_grid,
+                      scale_mode='none', scale_factor=0.5)
+        point_cloud.module_manager.scalar_lut_manager.lut.table = isosurface_lut
+        print(f"Mapping points took {(time.time()-temp_time):.2f}s")
         
         mlab.view(azimuth=30, elevation=60, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
         main_arr = mlab.screenshot(antialiased=True)
@@ -463,12 +555,12 @@ def create_merger_movie():
         pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
         # Paste the resized PiP array onto the main array
         main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
-        progress_plot_w, progress_plot_h = int(orig_pip_w / PROGRESS_WAVE_SCALE), int(orig_pip_h // PROGRESS_WAVE_SCALE)
+        w_buff = 10
+        progress_plot_w, progress_plot_h = int(orig_pip_w - 2*w_buff), int(orig_pip_h // PROGRESS_WAVE_SCALE)
 
         progress_plot_array = make_progress_signal_plot(h_lm_signal, anim_time_indices, i_frame,
                                                        progress_plot_w, progress_plot_h, BG_COLOR)
-        h_buff = w_buff = 10
-        main_arr[h_buff:(progress_plot_h + h_buff), w_buff:(progress_plot_w + w_buff)] = progress_plot_array
+        main_arr[-progress_plot_h:, w_buff:-w_buff] = progress_plot_array
         if timing_bool:
             print(f"slicing arrays and making the progress plot took {(time.time() - temp_time):.2f}s")
         temp_time = time.time()
