@@ -2,7 +2,7 @@ import numpy as np
 import sxs
 from mayavi import mlab
 import matplotlib.pyplot as plt
-import imageio.v2 as imageio # clarification of v2 is important I'm told
+import imageio.v2 as imageio # clarification
 import cv2
 import os
 import time
@@ -10,24 +10,23 @@ import inspect
 import sys
 
 # --- Configuration Parameters ---
-SXS_ID = "SXS:BBH:0308"
-OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_3D_strain_displacement_test.mp4"
+SXS_ID = "SXS:BBH:0160"
+OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_3D_strain_isosurfaces_3.mp4"
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 308
 loop_size = 4
 representation_str = 'surface'
 NUM_FRAMES = 300
-FPS = 20
+FPS = 24
 timing_bool = False
 
 # Strain Visualization Parameters
-MAX_XYZ = 50.
-POINTS_PER_DIM = 40 # resolution on each axis
-STRAIN_SCALE = 100 # Factor to scale h+ for z-displacement (TUNE THIS!)
+MAX_XYZ = 100.
+POINTS_PER_DIM = 80 # resolution on each axis
+STRAIN_SCALE = 100 # Factor to scale h+ for z-displacement (Not used)
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
-BG_COLOR = (0.4, 0.4, 0.4)
+BG_COLOR = (0.1, 0.1, 0.1)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
-
 
 PIP_CAMERA_DISTANCE = 30
 MAIN_CAMERA_DISTANCE = MAX_XYZ * 6.
@@ -284,7 +283,7 @@ def generate_3d_grid(num_r, r_min, r_max, num_theta, num_phi) -> np.ndarray:
 
 def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
                   x_grid: np.ndarray, y_grid: np.ndarray, z_grid: np.ndarray, r_grid: np.ndarray,
-                  theta_grid: np.ndarray, phi_grid: np.ndarray, scale_factor: float = 100):
+                  theta_grid: np.ndarray, phi_grid: np.ndarray):
     temp_time = time.time()
     """# Step 1: Same as before
     og_shape = r_grid.shape
@@ -324,7 +323,7 @@ def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
     unique_times, inverse_indices = np.unique(ret_times_flat, return_inverse=True)
 
     # Step 2: Initialize output
-    final_strain_grid = np.zeros(og_shape, dtype=complex)
+    final_strain_grid = np.zeros(og_shape)
     final_strain_flat = final_strain_grid.ravel() # A flattened view for easy assignment
 
     # Also flatten directions for easier indexing
@@ -347,13 +346,12 @@ def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
         strain_values = strain_coeffs_at_time.evaluate(directions_for_this_time)
 
         # Place the results into the flattened output array
-        final_strain_flat[target_indices] = strain_values
-    print(final_strain_grid.shape)
+        final_strain_flat[target_indices] = strain_values.real
 
     print(f"that took {(time.time() - temp_time):.2f}s. yikes")
 
 
-    return scale_factor * final_strain_grid.real
+    return final_strain_grid, np.max(final_strain_flat)
 
 # --- Main Animation Logic ---
 def create_merger_movie():
@@ -362,8 +360,8 @@ def create_merger_movie():
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
-    start_back_prop = 0.2 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.05 # fraction of total sim time to go forwards from peak strain for the end
+    start_back_prop = 0.3 # fraction of total sim time to go back from peak strain for the start
+    end_for_prop = 0.5 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
     common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
@@ -379,17 +377,19 @@ def create_merger_movie():
     x_axis = np.linspace(-MAX_XYZ, MAX_XYZ, POINTS_PER_DIM)
     y_axis = np.linspace(-MAX_XYZ, MAX_XYZ, POINTS_PER_DIM)
     z_axis = np.linspace(-MAX_XYZ, MAX_XYZ, POINTS_PER_DIM)
-    x_grid, y_grid, z_grid = np.meshgrid(x_axis, y_axis, z_axis)
+    x_grid, y_grid, z_grid = np.meshgrid(x_axis, y_axis, z_axis, indexing='ij')
     r_grid = np.sqrt((x_grid ** 2) + (y_grid ** 2) + (z_grid ** 2))
     theta_grid = np.arctan(np.sqrt((x_grid ** 2) + (y_grid ** 2))/z_grid)
     phi_grid = np.arctan(y_grid/x_grid)
-
+    _, peak_strain_at_point = figure_it_out(strain_modes_sxs, peak_strain_time, x_grid, y_grid,
+                                    z_grid, r_grid, theta_grid, phi_grid)
+    strain_for_contours = [0.1*peak_strain_at_point]
 
     bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
     spin_arrow_size *= 8
 
     frame_files = []
-    frames_dir_path = "frames" # Changed directory name as requested
+    frames_dir_path = "frames"
     os.makedirs(frames_dir_path, exist_ok=True)
 
     total_physical_anim_time = anim_lab_times[-1] - anim_lab_times[0]
@@ -398,15 +398,16 @@ def create_merger_movie():
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
 
-    for i_frame, current_lab_time in enumerate(anim_lab_times):
+    for i_frame, current_lab_time in enumerate(anim_lab_times):        
         frame_render_start_time = time.time()
         if not auto_loop_bool:
             print(f"Processing frame {i_frame+1}/{NUM_FRAMES} for lab_time = {current_lab_time:.2f} M")
         
         lab_time_step = current_lab_time - anim_lab_times[i_frame - 1] # It will be the whole animation time on frame 0, but is not used then
-
+        strain_grid, _ = figure_it_out(strain_modes_sxs, current_lab_time, x_grid, y_grid,
+                                    z_grid, r_grid, theta_grid, phi_grid)
         mlab.clf()
-        
+
         temp_time = time.time()
         if current_lab_time < common_horizon_start:
             # plot BH1
@@ -435,11 +436,8 @@ def create_merger_movie():
             spin3_obj.remove()
 
         # plot strain isosurfaces
-        strain_grid = figure_it_out(strain_modes_sxs, current_lab_time, x_grid, y_grid,
-                                    z_grid, r_grid, theta_grid, phi_grid, STRAIN_SCALE)
-
-        mlab.points3d(x_grid, y_grid, z_grid, strain_grid,
-                    colormap='cool', opacity=0.4, scale_factor=0.5, scale_mode='none')
+        mlab.contour3d(x_grid, y_grid, z_grid, strain_grid, contours=4, colormap='nipy_spectral',
+                       opacity=0.2)
         
         
         mlab.view(azimuth=15, elevation=70, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
@@ -451,12 +449,12 @@ def create_merger_movie():
         pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
         # Paste the resized PiP array onto the main array
         main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
-        progress_plot_w, progress_plot_h = int(orig_pip_w / PROGRESS_WAVE_SCALE), int(orig_pip_h // PROGRESS_WAVE_SCALE)
+        w_buff = 10
+        progress_plot_w, progress_plot_h = int(orig_pip_w - 2*w_buff), int(orig_pip_h // PROGRESS_WAVE_SCALE)
 
         progress_plot_array = make_progress_signal_plot(h_lm_signal, anim_time_indices, i_frame,
                                                        progress_plot_w, progress_plot_h, BG_COLOR)
-        h_buff = w_buff = 10
-        main_arr[h_buff:(progress_plot_h + h_buff), w_buff:(progress_plot_w + w_buff)] = progress_plot_array
+        main_arr[-progress_plot_h:, w_buff:-w_buff] = progress_plot_array
         if timing_bool:
             print(f"slicing arrays and making the progress plot took {(time.time() - temp_time):.2f}s")
         temp_time = time.time()
