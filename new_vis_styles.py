@@ -2,7 +2,8 @@ import numpy as np
 import sxs
 from mayavi import mlab
 import matplotlib.pyplot as plt
-import imageio.v2 as imageio # clarification
+import imageio.v2 as imageio
+import scipy.io.wavfile as wavfile
 import cv2
 from tvtk.api import tvtk
 import os
@@ -11,29 +12,31 @@ import inspect
 import sys
 
 # --- Configuration Parameters ---
-SXS_ID = "SXS:BBH:0160"
+SXS_ID = "SXS:BBH:0001"
 OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_strain_volume.mp4"
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 308
 loop_size = 4
-NUM_FRAMES = 500
+NUM_FRAMES = 400
 FPS = 24
 timing_bool = True
 
 # Strain Visualization Parameters
 MAX_XYZ = 100.
-POINTS_PER_DIM = 40 # resolution on each axis
+POINTS_PER_DIM = 30 # resolution on each axis
+if POINTS_PER_DIM % 2 == 1:
+    POINTS_PER_DIM += 1 # MUST BE EVEN to avoid divide by zero errors/theta pole singularities
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.2, 0.2, 0.2)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
-OPACITY_SPIKE_WIDTH = 1. # Width of each opaque-ish region as a percentage of total data range 
-MAX_OPACITY = 0.07
-BASE_OPACITY = 0.
-STRAIN_COLORMAP = 'hsv'
-SPIKE_SHAPE = 'triangle' # options are 'triangle', 'box', or 'gaussian'
-VALUES_TO_BE_OPAQUE = np.array([0.2, 0.4, 0.5, 0.6, 0.7, 0.8]) # fractions of peak strain to make an opaque region around
-VALUES_TO_BE_OPAQUE = np.delete(np.linspace(-1, 1, 9), 4)
-CLIP_FRAC = 1
+OPACITY_SPIKE_WIDTH = 0.5 # Width of each opaque-ish region as a percentage of total data range 
+MAX_OPACITY = 0.09
+BASE_OPACITY = 0.0
+STRAIN_COLORMAP = 'gist_ncar'
+SPIKE_SHAPE = 'gaussian' # options are 'triangle', 'box', or 'gaussian'
+VALUES_TO_BE_OPAQUE = np.array([-1, -0.7, -0.45, -0.27, 0.27, 0.45, 0.7, 1]) # fractions of peak strain to make an opaque region around
+# VALUES_TO_BE_OPAQUE = np.delete(np.linspace(0.1, 0.6, 6), 5)
+CLIP_FRAC = 0.9
 
 PIP_CAMERA_DISTANCE = 30
 MAIN_CAMERA_DISTANCE = MAX_XYZ * 5.
@@ -291,7 +294,6 @@ def generate_3d_grid(num_r, r_min, r_max, num_theta, num_phi) -> np.ndarray:
 def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
                   x_grid: np.ndarray, y_grid: np.ndarray, z_grid: np.ndarray, r_grid: np.ndarray,
                   theta_grid: np.ndarray, phi_grid: np.ndarray):
-    temp_time = time.time()
     """# Step 1: Same as before
     og_shape = r_grid.shape
     ret_times_flat = (lab_time_t - r_grid).ravel()
@@ -355,10 +357,46 @@ def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
         # Place the results into the flattened output array
         final_strain_flat[target_indices] = strain_values.real
 
-    print(f"that took {(time.time() - temp_time):.2f}s. yikes")
-
-
     return final_strain_grid, np.min(final_strain_flat), np.max(final_strain_flat)
+
+
+def sonify_strain(dom_mode_signal: sxs.waveforms.WaveformModes,
+                angular_velocity_TS: sxs.TimeSeries,
+                anim_time_indices: np.ndarray,
+                num_seconds: float
+):
+    trimmed_strain_signal = dom_mode_signal[anim_time_indices[0]:(anim_time_indices[-1] + 1)]
+    time_array = trimmed_strain_signal.t
+    sample_rate = int(len(time_array)/num_seconds)
+    amplitude = np.asarray(trimmed_strain_signal.abs.data)
+    angular_velocity_interpolated = angular_velocity_TS.interpolate(time_array)
+    print(angular_velocity_interpolated)
+
+    omega_time = angular_velocity_interpolated.t
+    frequency_to_hear = 4000 * np.asarray(angular_velocity_interpolated.data)
+    phase = np.cumsum(frequency_to_hear / sample_rate)
+
+    amplitude_normalized = amplitude / np.max(amplitude)
+    # waveform = A(t) * sin(phase(t))
+    waveform = amplitude_normalized * np.sin(phase)
+
+    fig, (plot1, plot2) = plt.subplots(2)
+    plot1.plot(omega_time, frequency_to_hear)
+    plot2.plot(time_array, amplitude_normalized)
+    plt.show()
+    # Convert to 16-bit integer format (for WAV file)
+    # The range for 16-bit is -32768 to 32767
+    waveform_16bit = np.int16(waveform * 32767)
+    print(len(waveform_16bit), num_seconds, sample_rate)
+
+    # Save the Audio File
+    filename = "gravitational_wave_sonification.wav"
+    wavfile.write(filename, sample_rate, waveform_16bit)
+
+    print(f"Audio saved to {filename}")
+
+    return filename
+
 
 def create_color_opacity_transfer_functions(
     isosurface_values: list[float],
@@ -377,7 +415,7 @@ def create_color_opacity_transfer_functions(
 
     Args:
         values (List[Scalar]):
-            A list of scalar values where opacity spikes should be centered.
+            A list of floats where opacity spikes should be centered, ranging from -1. to 1.
         data_range (Tuple[Scalar, Scalar]):
             The (min, max) range of the scalar data.
         width_percent (float, optional):
@@ -417,36 +455,39 @@ def create_color_opacity_transfer_functions(
     # This ensures regions without spikes have the specified base opacity.
     otf.add_point(data_min, base_opacity)
     otf.add_point(data_max, base_opacity)
+    data_width = data_max - data_min
 
     # 4. Create opacity spikes and corresponding color points
     # Calculate the absolute width of the spike from the percentage
-    scalar_width = (spike_width_percent / 100.0) * (data_max - data_min)
+    scalar_width = (spike_width_percent / 100.0) * data_width
     half_width = scalar_width / 2.0
 
     for val in sorted(isosurface_values):
         # Normalize the value to sample the colormap
-        norm_val = (val - data_min) / (data_max - data_min)
+        norm_val = (val/2) + 0.5
+        data_val = (norm_val * data_width) + data_min
         color = cmap(np.clip(norm_val, 0.0, 1.0)) # Clip to handle values outside range
+        print(val, norm_val, data_val)
 
         # Add the color point at the center of the spike
-        ctf.add_rgb_point(val, color[0], color[1], color[2])
+        ctf.add_rgb_point(data_val, color[0], color[1], color[2])
 
         # Define the spike region, ensuring it stays within the data range
-        start = np.clip(val - half_width, data_min, data_max)
-        end = np.clip(val + half_width, data_min, data_max)
-        center = np.clip(val, data_min, data_max)
+        start = np.clip(data_val - half_width, data_min, data_max)
+        end = np.clip(data_val + half_width, data_min, data_max)
+        center = np.clip(data_val, data_min, data_max)
 
         # Add points to the opacity function based on the chosen shape
         if spike_shape == 'triangle':
             # Smooth 5-point spike
             otf.add_point(start, base_opacity)
-            otf.add_point(np.clip(val - half_width / 2.0, data_min, data_max), max_opacity * 0.5)
+            otf.add_point(np.clip(data_val - half_width / 2.0, data_min, data_max), max_opacity * 0.3)
             otf.add_point(center, max_opacity)
-            otf.add_point(np.clip(val + half_width / 2.0, data_min, data_max), max_opacity * 0.5)
+            otf.add_point(np.clip(data_val + half_width / 2.0, data_min, data_max), max_opacity * 0.3)
             otf.add_point(end, base_opacity)
         elif spike_shape == 'box':
             # Sharp 4-point "top-hat" spike
-            epsilon = (data_max - data_min) / 10000.0 # Tiny offset for vertical lines
+            epsilon = data_width / 10000.0 # Tiny offset for vertical lines
             otf.add_point(np.clip(start - epsilon, data_min, data_max), base_opacity)
             otf.add_point(start, max_opacity)
             otf.add_point(end, max_opacity)
@@ -454,9 +495,12 @@ def create_color_opacity_transfer_functions(
         elif spike_shape == 'gaussian':
             # Create a smoother, more realistic falloff
             # We add several points to approximate the curve
+            epsilon = data_width / 10000.0
+            otf.add_point(np.clip(start - epsilon, data_min, data_max), base_opacity)
+            otf.add_point(np.clip(end + epsilon, data_min, data_max), base_opacity)
             for i in np.linspace(-1, 1, 15): # Use 15 points to define the curve
                 # Map i from [-1, 1] to the scalar range [start, end]
-                point_val = val + i * half_width
+                point_val = data_val + i * half_width
                 
                 # Gaussian function: exp(-x^2 / (2*sigma^2))
                 # Here, we use a simpler form where i is our normalized x
@@ -464,7 +508,7 @@ def create_color_opacity_transfer_functions(
                 
                 # Clip the point and ensure it doesn't dip below base_opacity
                 clipped_val = np.clip(point_val, data_min, data_max)
-                final_opacity = max(opacity, base_opacity if clipped_val in (start, end) else 0)
+                final_opacity = max(opacity, base_opacity)
                 otf.add_point(clipped_val, final_opacity)
 
     return ctf, otf, lut_out
@@ -476,8 +520,8 @@ def create_merger_movie():
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
-    start_back_prop = 0.15 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.5 # fraction of total sim time to go forwards from peak strain for the end
+    start_back_prop = 0.3 # fraction of total sim time to go back from peak strain for the start
+    end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
     common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
@@ -487,6 +531,7 @@ def create_merger_movie():
 
     anim_lab_times, anim_time_indices = pseudo_uniform_times(sample_times, peak_strain_time, start_back_prop, end_for_prop)
     print(f"Animation time: {anim_lab_times[0]:.2f}M to {anim_lab_times[-1]:.2f}M over {len(anim_lab_times)} frames.")
+    print(f"Peak strain is around {peak_strain_time:.2f}M.")
     mlab.figure(size=(1280, 1024), bgcolor=BG_COLOR)
     # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
@@ -500,31 +545,27 @@ def create_merger_movie():
     _, min_strain, max_strain = figure_it_out(strain_modes_sxs, peak_strain_time, x_grid, y_grid,
                                     z_grid, r_grid, theta_grid, phi_grid)
     print(min_strain, max_strain)
-    peak_strain_amp = CLIP_FRAC*(max_strain - min_strain)/2
-    strain_values_to_isosurfaces = peak_strain_amp * VALUES_TO_BE_OPAQUE
-    bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_t = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
+    max_strain, min_strain = CLIP_FRAC*max_strain, CLIP_FRAC*min_strain
+    avg_peak_strain_amp = (max_strain - min_strain)/2
+    bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
     spin_arrow_size *= 7
 
+    sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
     frame_files = []
     frames_dir_path = "frames"
     os.makedirs(frames_dir_path, exist_ok=True)
 
     color_transfer_function, opacity_transfer_function, colorbar_lut = create_color_opacity_transfer_functions(
-        strain_values_to_isosurfaces, (CLIP_FRAC*min_strain, CLIP_FRAC*max_strain), OPACITY_SPIKE_WIDTH, MAX_OPACITY,
+        VALUES_TO_BE_OPAQUE, (min_strain, max_strain), OPACITY_SPIKE_WIDTH, MAX_OPACITY,
         BASE_OPACITY, STRAIN_COLORMAP, SPIKE_SHAPE)
-    bar_top = 0.92
+    bar_top = 0.923
     bar_bottom = 0.149
     bar_height = bar_top - bar_bottom
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
 
-    for i_frame, current_lab_time in enumerate(anim_lab_times):   
-        if i_frame < 122:
-            frame_filename = f"{frames_dir_path}/frame_{i_frame:04d}.png"
-            frame_files.append(frame_filename)
-            continue
-
+    for i_frame, current_lab_time in enumerate(anim_lab_times):
         frame_render_start_time = time.time()
         if not auto_loop_bool:
             print(f"Processing frame {i_frame+1}/{NUM_FRAMES} for lab_time = {current_lab_time:.2f} M")
@@ -542,17 +583,17 @@ def create_merger_movie():
             # plot BH1
             mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
             spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1', colormap=STRAIN_COLORMAP)
+                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1', opacity=0.7)
             # plot BH2
             mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 2')
             spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2')
+                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2', opacity=0.7)
 
         else:
             # plot merged BH
             mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
             spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3')
+                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3', opacity=0.7)
         if timing_bool:
             print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
 
@@ -575,7 +616,7 @@ def create_merger_movie():
         mlab.colorbar(object=strain_cloud, orientation='vertical', nb_labels=0)
         mlab.text(0.01, 0.96, "Real Polarized Strain (unscaled)", width=0.33, line_width=6)
         for frac in VALUES_TO_BE_OPAQUE:
-            mlab.text(0.053, bar_bottom + ((frac/2) + 0.5)*bar_height, f"{(frac*peak_strain_amp):.3f}", width=0.05)
+            mlab.text(0.053, bar_bottom + ((frac/2) + 0.5)*bar_height, f"{(frac*avg_peak_strain_amp):.3f}", width=0.05)
         print(f"Rendering strain volume took {(time.time() - temp_time):.2f}s")
     
         temp_time = time.time()
@@ -594,7 +635,7 @@ def create_merger_movie():
                                                        progress_plot_w, progress_plot_h, BG_COLOR)
         main_arr[-progress_plot_h:, w_buff:-w_buff] = progress_plot_array
         if timing_bool:
-            print(f"Screenshotting, slicing arrays, and making the progress plot took {(time.time() - temp_time):.2f}s")
+            print(f"Screenshotting, slicing arrays, and progress wave took {(time.time() - temp_time):.2f}s")
         temp_time = time.time()
         frame_filename = f"{frames_dir_path}/frame_{i_frame:04d}.png"
         combined_frame = cv2.cvtColor(main_arr, cv2.COLOR_RGB2BGR)
