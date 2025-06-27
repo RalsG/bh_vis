@@ -2,10 +2,10 @@ import numpy as np
 import sxs
 from mayavi import mlab
 import matplotlib.pyplot as plt
-import imageio.v2 as imageio
-import scipy.io.wavfile as wavfile
-import cv2
 from tvtk.api import tvtk
+import scipy.io.wavfile as wavfile # Eventually switch over to full moviepy, not urgent
+import cv2
+import moviepy
 import os
 import time
 import inspect
@@ -13,33 +13,38 @@ import sys
 
 # --- Configuration Parameters ---
 SXS_ID = "SXS:BBH:0001"
-OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_strain_volume.mp4"
+OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_with_noise_and_arms_2.mp4"
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 308
 loop_size = 4
-NUM_FRAMES = 400
+NUM_FRAMES = 500
 FPS = 24
 timing_bool = True
 
 # Strain Visualization Parameters
 MAX_XYZ = 100.
-POINTS_PER_DIM = 30 # resolution on each axis
+POINTS_PER_DIM = 10 # resolution on each axis
 if POINTS_PER_DIM % 2 == 1:
     POINTS_PER_DIM += 1 # MUST BE EVEN to avoid divide by zero errors/theta pole singularities
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.2, 0.2, 0.2)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
 OPACITY_SPIKE_WIDTH = 0.5 # Width of each opaque-ish region as a percentage of total data range 
-MAX_OPACITY = 0.09
+MAX_OPACITY = 0.18
 BASE_OPACITY = 0.0
 STRAIN_COLORMAP = 'gist_ncar'
 SPIKE_SHAPE = 'gaussian' # options are 'triangle', 'box', or 'gaussian'
-VALUES_TO_BE_OPAQUE = np.array([-1, -0.7, -0.45, -0.27, 0.27, 0.45, 0.7, 1]) # fractions of peak strain to make an opaque region around
+VALUES_TO_BE_OPAQUE = np.array([-1, -0.7, -0.5, -0.32, -0.17, 0.17, 0.32, 0.5, 0.7, 1]) # fractions of peak strain to make an opaque region around
 # VALUES_TO_BE_OPAQUE = np.delete(np.linspace(0.1, 0.6, 6), 5)
 CLIP_FRAC = 0.9
 
+NUM_RINGS = 1
+RING_SIZE = 0.8 * MAX_XYZ
+r_axis = np.array([MAX_XYZ])
+STRAIN_SCALE = 8 * RING_SIZE
+
 PIP_CAMERA_DISTANCE = 30
-MAIN_CAMERA_DISTANCE = MAX_XYZ * 5.
+MAIN_CAMERA_DISTANCE = MAX_XYZ * 4.5
 BH_ELEVATION = 0 # Set 0 or a positive float to have the BHs rotate above the strain surface
 PIP_SCALE = 4.0 # This is the ratio of window to PiP
 PROGRESS_WAVE_SCALE = 8 # ratio of window to progress waveform heigt at bottom
@@ -57,7 +62,7 @@ def load_simulation_data(sxs_id_str):
     except Exception as e: print(f"Error loading simulation {sxs_id_str}: {e}"); raise
     
     strain_modes = getattr(simulation, 'h', None)
-    if strain_modes is not None: print(f"strain modes loaded. Time range: {strain_modes.t[0]:.2f}M to {strain_modes.t[-1]:.2f}M.")
+    if strain_modes is not None: print(f"Strain modes loaded. Time range: {strain_modes.t[0]:.2f}M to {strain_modes.t[-1]:.2f}M.")
     else: raise ValueError(f"Strain not found or empty for simulation {sxs_id_str}.")
     
     horizons_data = getattr(simulation, 'horizons', None)
@@ -360,40 +365,247 @@ def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
     return final_strain_grid, np.min(final_strain_flat), np.max(final_strain_flat)
 
 
-def sonify_strain(dom_mode_signal: sxs.waveforms.WaveformModes,
+def generate_ring_cartesian_coords(
+    num_observatories: int,
+    arm_length: float,
+    radial_axis: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Generates Cartesian coordinates (x, y, z) for multiple model "LIGOs" (2 orthogonal vectors).
+
+    The geometry consists of 'num_rings' vertical rings, whose centers are
+    evenly spaced on a circle. This entire configuration is then generated
+    at each radius specified in the 'radial_axis'.
+
+    Args:
+        num_rings (int): The number of vertical rings in a single set.
+        num_points (int): The number of points to generate for each ring.
+        ring_radius (float): The 3D radius of the individual rings.
+        radial_axis np.ndarray: An array of radii. The entire set of
+            'num_rings' will be generated for each radius in this array.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: A tuple containing the
+            x, y, and z coordinate matrices of shape (len(radial_axis),
+            num_rings, num_points).
+    """
+    # Handle empty or invalid inputs
+    if num_observatories <= 0 or len(radial_axis) == 0:
+        return (np.array([]), np.array([]), np.array([]))
+
+    # 1. Define the base angles for ring centers and points within a ring
+    ring_center_phis = np.array([np.pi/4])
+
+    # 2. Create 2D grids for observatory center radii and arms using meshgrid.
+    # This prepares the data for vectorized operations
+    r_centers, phi_centers = np.meshgrid(radial_axis, ring_center_phis)
+
+    # 3. Use broadcasting to calculate coordinates for all points at once.
+    # Reshape array to (num_observatories, num_radii, 1) and (1, 1, 2)
+    # so that NumPy can broadcast them to a final shape of
+    # (num_observatories, num_radii, 3).
+    r_broadcast = r_centers[..., np.newaxis]
+    phi_broadcast = phi_centers[..., np.newaxis]
+
+    x_centers = r_broadcast * np.cos(phi_broadcast)
+    y_centers = r_broadcast * np.sin(phi_broadcast)
+    z_centers = np.zeros_like(x_centers)
+
+    x_arms = np.array([[[-arm_length, 0]]])
+    y_arms = np.array([[[0, -arm_length]]])
+    z_arms = np.array([[[0, 0]]])
+
+    x_cart = x_centers + x_arms
+    y_cart = y_centers + y_arms
+    z_cart = z_centers + z_arms
+
+    x_centers = (x_cart - x_arms).transpose(1, 0, 2)
+    y_centers = (y_cart - y_arms).transpose(1, 0, 2)
+    z_centers = (z_cart - z_arms).transpose(1, 0, 2)
+    
+    x_final = x_cart.transpose(1, 0, 2)
+    y_final = y_cart.transpose(1, 0, 2)
+    z_final = z_cart.transpose(1, 0, 2)
+
+    return x_final, y_final, z_final, x_centers, y_centers, z_centers
+
+def generate_ring_data(
+    strain_modes: sxs.waveforms.WaveformModes,
+    num_rings: int,
+    ring_radius: float,
+    radial_axis: np.ndarray
+) -> tuple:
+    """
+    Generates data for points on rings and for the centers of those rings.
+
+    This function prepares all geometric information needed for the strain
+    calculation, including point coordinates, point directions, ring center
+    coordinates, and ring center directions.
+
+    Args:
+        num_rings: The number of vertical rings in a single concentric set.
+        num_points: The number of points to generate for each ring.
+        ring_radius: The 3D radius of the individual rings.
+        radial_axis: An array of radii for the ring centers.
+
+    Returns:
+        A tuple containing:
+        - x_grid, y_grid, z_grid: Cartesian coordinates of each point.
+          Shape: (len(radial_axis), num_rings, num_points)
+        - directions_grid: Spherical [theta, phi] of each point.
+          Shape: (len(radial_axis), num_rings, num_points, 2)
+        - center_directions: Spherical [theta, phi] of each ring center.
+          Shape: (len(radial_axis), num_rings, 2)
+        - center_radii: Radial distance of each ring center.
+          Shape: (len(radial_axis), num_rings)
+    """
+    # Generate the Cartesian coordinates of every point on the rings
+    x_grid, y_grid, z_grid, x_centers, y_centers, z_centers = generate_ring_cartesian_coords(
+        num_rings, ring_radius, radial_axis
+    )
+
+    # --- Calculate data for the center of each ring ---
+    # The radii of the centers are simply the values from the input radial_axis
+    num_radii = len(radial_axis)
+
+    # The directions of the centers are on the equator (theta=pi/2)
+    # with phi angles distributed evenly.
+    ring_center_phis = np.array([np.pi/4])
+    center_theta = np.full((num_radii, num_rings), np.pi / 2)
+    center_phi = np.tile(ring_center_phis, (num_radii, 1))
+    center_directions = np.stack((center_theta, center_phi), axis=-1)
+
+    # 2. Evaluate the strain at each ring center's direction. This returns
+    # an array of TimeSeries objects, one for each ring center.
+    strain_at_centers = strain_modes.evaluate(center_directions[0])
+
+    return x_grid, y_grid, z_grid, center_directions, strain_at_centers, x_centers, y_centers, z_centers
+
+
+def disturb_the_points(
+    strain_at_centers: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    z_grid: np.ndarray,
+    center_directions: np.ndarray,
+    radial_axis: np.ndarray,
+    lab_time: float,
+    amplitude_scale: float = 50.0
+) -> tuple:
+    """
+    Displaces points near 'centers' using strain evaluated at each center.
+
+    Args:
+        sxs_strain_modes: The SXS waveform object containing strain modes.
+        x_grid, y_grid, z_grid: Cartesian coordinates of the points on the rings.
+        directions_grid: Spherical coordinates [theta, phi] for each point.
+        center_radii: Radial distance for each ring CENTER.
+        lab_time: The observer's laboratory time.
+        amplitude_scale: A scaling factor for the displacement visualization.
+
+    Returns:
+        A tuple with displaced coordinates, displacement vectors, and magnitude.
+    """
+    # Calculate the retarded time for each RING CENTER
+    retarded_times_centers = np.flip(lab_time - radial_axis)
+
+    # Interpolate each TimeSeries at the corresponding retarded time.
+    strain_interpolated_obj = strain_at_centers.interpolate(retarded_times_centers)
+    h_at_centers = np.flip(np.asarray(strain_interpolated_obj), axis=0)
+    
+    # Apply 1/r falloff using the radius of the ring centers
+    radial_axis = radial_axis[:, np.newaxis]
+    h_at_centers = np.divide(h_at_centers, radial_axis, where=(radial_axis != 0))
+    
+
+    h_plus = amplitude_scale * h_at_centers.real # shape (num_r, num_rings, num_points)
+    h_cross = amplitude_scale * h_at_centers.imag
+
+    # Calculate polarization basis using the RING CENTER'S direction.
+    # This ensures the "stretch" and "squeeze" axes are the same for all points on one ring.
+    center_theta = center_directions[..., 0]
+    center_phi = center_directions[..., 1]
+    cos_theta, sin_theta = np.cos(center_theta), np.sin(center_theta)
+    cos_phi, sin_phi = np.cos(center_phi), np.sin(center_phi)
+
+    e_theta_x, e_theta_y, e_theta_z = cos_theta * cos_phi, cos_theta * sin_phi, -sin_theta
+    e_phi_x, e_phi_y, e_phi_z = -sin_phi, cos_phi, 0
+
+    # Construct the polarization basis tensors e_plus_ij and e_cross_ij
+    # e_plus = e_theta ⊗ e_theta - e_phi ⊗ e_phi
+    # e_cross = e_theta ⊗ e_phi + e_phi ⊗ e_theta
+    e_plus_xx = e_theta_x**2 - e_phi_x**2
+    e_plus_yy = e_theta_y**2 - e_phi_y**2
+    e_plus_zz = e_theta_z**2 - e_phi_z**2
+    e_plus_xy = e_theta_x * e_theta_y - e_phi_x * e_phi_y
+    e_plus_xz = e_theta_x * e_theta_z - e_phi_x * e_phi_z
+    e_plus_yz = e_theta_y * e_theta_z - e_phi_y * e_phi_z
+
+    e_cross_xx = 2 * e_theta_x * e_phi_x
+    e_cross_yy = 2 * e_theta_y * e_phi_y
+    e_cross_zz = 2 * e_theta_z * e_phi_z
+    e_cross_xy = e_theta_x * e_phi_y + e_phi_x * e_theta_y
+    e_cross_xz = e_theta_x * e_phi_z + e_phi_x * e_theta_z
+    e_cross_yz = e_theta_y * e_phi_z + e_phi_y * e_theta_z
+
+    # 4. Construct the full strain tensor h_ij at each point
+    h_xx = h_plus * e_plus_xx + h_cross * e_cross_xx
+    h_yy = h_plus * e_plus_yy + h_cross * e_cross_yy
+    h_zz = h_plus * e_plus_zz + h_cross * e_cross_zz
+    h_xy = h_plus * e_plus_xy + h_cross * e_cross_xy
+    h_xz = h_plus * e_plus_xz + h_cross * e_cross_xz
+    h_yz = h_plus * e_plus_yz + h_cross * e_cross_yz
+
+    # 5. Calculate the displacement vector using δx_i = 0.5 * h_ij * x_j
+    delta_x = h_xx[:, :, np.newaxis] * x_grid + h_xy[:, :, np.newaxis] * y_grid + h_xz[:, :, np.newaxis] * z_grid
+    delta_y = h_xy[:, :, np.newaxis] * x_grid + h_yy[:, :, np.newaxis] * y_grid + h_yz[:, :, np.newaxis] * z_grid
+    delta_z = h_xz[:, :, np.newaxis] * x_grid + h_yz[:, :, np.newaxis] * y_grid + h_zz[:, :, np.newaxis] * z_grid
+
+    # 6. Apply the displacement to the Cartesian grid objects
+    x_grid_out = x_grid + delta_x
+    y_grid_out = y_grid + delta_y
+    z_grid_out = z_grid + delta_z
+
+    displacement_scalars = np.sqrt((delta_x ** 2) + (delta_y ** 2) + (delta_z ** 2))
+
+    return  x_grid_out, y_grid_out, z_grid_out, delta_x, delta_y, delta_z, displacement_scalars
+
+
+def sonify_strain(dom_strain_mode: sxs.waveforms.WaveformModes,
                 angular_velocity_TS: sxs.TimeSeries,
                 anim_time_indices: np.ndarray,
-                num_seconds: float
+                num_seconds: float,
+                sample_rate = 44100
 ):
-    trimmed_strain_signal = dom_mode_signal[anim_time_indices[0]:(anim_time_indices[-1] + 1)]
-    time_array = trimmed_strain_signal.t
-    sample_rate = int(len(time_array)/num_seconds)
-    amplitude = np.asarray(trimmed_strain_signal.abs.data)
-    angular_velocity_interpolated = angular_velocity_TS.interpolate(time_array)
-    print(angular_velocity_interpolated)
+    trimmed_strain_signal = dom_strain_mode[anim_time_indices[0]:(anim_time_indices[-1] + 1)]
+    sample_times = trimmed_strain_signal.t
+    uniform_time_array = np.linspace(sample_times[0], sample_times[-1], int(sample_rate * num_seconds))
+    uniform_strain_array = trimmed_strain_signal.interpolate(uniform_time_array)
+    amplitude = uniform_strain_array.abs.ndarray
+    angular_velocity_interpolated = angular_velocity_TS.interpolate(uniform_time_array)
 
-    omega_time = angular_velocity_interpolated.t
-    frequency_to_hear = 4000 * np.asarray(angular_velocity_interpolated.data)
+    raw_frequency = angular_velocity_interpolated.ndarray
+    idx = np.argmax(amplitude)
+    general_multiplier = 15000/raw_frequency[idx]
+
+    # artistic choice to make the whole range hearable - NEEDS TO BE TUNED
+    frequency_to_hear = 1512 * np.log(68 * raw_frequency)
+    frequency_to_hear = general_multiplier * raw_frequency
     phase = np.cumsum(frequency_to_hear / sample_rate)
 
     amplitude_normalized = amplitude / np.max(amplitude)
     # waveform = A(t) * sin(phase(t))
     waveform = amplitude_normalized * np.sin(phase)
 
-    fig, (plot1, plot2) = plt.subplots(2)
-    plot1.plot(omega_time, frequency_to_hear)
-    plot2.plot(time_array, amplitude_normalized)
-    plt.show()
     # Convert to 16-bit integer format (for WAV file)
     # The range for 16-bit is -32768 to 32767
     waveform_16bit = np.int16(waveform * 32767)
-    print(len(waveform_16bit), num_seconds, sample_rate)
 
     # Save the Audio File
     filename = "gravitational_wave_sonification.wav"
     wavfile.write(filename, sample_rate, waveform_16bit)
-
     print(f"Audio saved to {filename}")
+
 
     return filename
 
@@ -436,7 +648,6 @@ def create_color_opacity_transfer_functions(
             A tuple containing the configured tvtk color and opacity functions.
     """
     data_min, data_max = data_range
-    print(colormap)
     if data_min >= data_max:
         # Return empty, valid objects for an invalid data range
         return tvtk.ColorTransferFunction(), tvtk.PiecewiseFunction()
@@ -463,11 +674,12 @@ def create_color_opacity_transfer_functions(
     half_width = scalar_width / 2.0
 
     for val in sorted(isosurface_values):
+        opacity_multiplier = abs(val) ** 1/4
+        val_opacity = max_opacity * opacity_multiplier
         # Normalize the value to sample the colormap
         norm_val = (val/2) + 0.5
         data_val = (norm_val * data_width) + data_min
         color = cmap(np.clip(norm_val, 0.0, 1.0)) # Clip to handle values outside range
-        print(val, norm_val, data_val)
 
         # Add the color point at the center of the spike
         ctf.add_rgb_point(data_val, color[0], color[1], color[2])
@@ -481,16 +693,16 @@ def create_color_opacity_transfer_functions(
         if spike_shape == 'triangle':
             # Smooth 5-point spike
             otf.add_point(start, base_opacity)
-            otf.add_point(np.clip(data_val - half_width / 2.0, data_min, data_max), max_opacity * 0.3)
-            otf.add_point(center, max_opacity)
-            otf.add_point(np.clip(data_val + half_width / 2.0, data_min, data_max), max_opacity * 0.3)
+            otf.add_point(np.clip(data_val - half_width / 2.0, data_min, data_max), val_opacity * 0.3)
+            otf.add_point(center, val_opacity)
+            otf.add_point(np.clip(data_val + half_width / 2.0, data_min, data_max), val_opacity * 0.3)
             otf.add_point(end, base_opacity)
         elif spike_shape == 'box':
             # Sharp 4-point "top-hat" spike
             epsilon = data_width / 10000.0 # Tiny offset for vertical lines
             otf.add_point(np.clip(start - epsilon, data_min, data_max), base_opacity)
-            otf.add_point(start, max_opacity)
-            otf.add_point(end, max_opacity)
+            otf.add_point(start, val_opacity)
+            otf.add_point(end, val_opacity)
             otf.add_point(np.clip(end + epsilon, data_min, data_max), base_opacity)
         elif spike_shape == 'gaussian':
             # Create a smoother, more realistic falloff
@@ -504,7 +716,7 @@ def create_color_opacity_transfer_functions(
                 
                 # Gaussian function: exp(-x^2 / (2*sigma^2))
                 # Here, we use a simpler form where i is our normalized x
-                opacity = max_opacity * np.exp(-(i**2) * 2.5) # The 2.5 is a shape factor
+                opacity = val_opacity * np.exp(-(i**2) * 2.5) # The 2.5 is a shape factor
                 
                 # Clip the point and ensure it doesn't dip below base_opacity
                 clipped_val = np.clip(point_val, data_min, data_max)
@@ -550,7 +762,7 @@ def create_merger_movie():
     bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
     spin_arrow_size *= 7
 
-    sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
+    wav_filename = sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
     frame_files = []
     frames_dir_path = "frames"
     os.makedirs(frames_dir_path, exist_ok=True)
@@ -561,6 +773,7 @@ def create_merger_movie():
     bar_top = 0.923
     bar_bottom = 0.149
     bar_height = bar_top - bar_bottom
+    x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(strain_modes_sxs, NUM_RINGS, RING_SIZE, r_axis)
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
@@ -574,6 +787,8 @@ def create_merger_movie():
         temp_time = time.time()
         strain_grid, _, _ = figure_it_out(strain_modes_sxs, current_lab_time, x_grid, y_grid,
                                     z_grid, r_grid, theta_grid, phi_grid)
+        x_grid_for_plotting, y_grid_for_plotting, z_grid_for_plotting, x_displace, y_displace, z_displace, displacement_scalars = disturb_the_points(
+            strain_at_centers, x_LIGO, y_LIGO, z_LIGO, center_directions, r_axis, current_lab_time, STRAIN_SCALE)
         if timing_bool:
             print(f"Evaluating strain grid took {(time.time() - temp_time):.2f}s")
         mlab.clf()
@@ -597,7 +812,7 @@ def create_merger_movie():
         if timing_bool:
             print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
 
-        mlab.view(azimuth=15, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,BH_ELEVATION))
+        mlab.view(azimuth=45, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,BH_ELEVATION))
         pip_arr_large = mlab.screenshot(antialiased=True)
         if current_lab_time < common_horizon_start:
             spin1_obj.remove()
@@ -617,10 +832,23 @@ def create_merger_movie():
         mlab.text(0.01, 0.96, "Real Polarized Strain (unscaled)", width=0.33, line_width=6)
         for frac in VALUES_TO_BE_OPAQUE:
             mlab.text(0.053, bar_bottom + ((frac/2) + 0.5)*bar_height, f"{(frac*avg_peak_strain_amp):.3f}", width=0.05)
-        print(f"Rendering strain volume took {(time.time() - temp_time):.2f}s")
+        if timing_bool:
+            print(f"Rendering strain volume took {(time.time() - temp_time):.2f}s")
+
+        temp_time = time.time()
+        mlab.points3d(x_centers, y_centers, z_centers, mode='cube', color=(0.45, 0.45, 0.45), scale_factor=8, opacity=0.9)
+        cylinders_obj = mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting - x_centers, y_grid_for_plotting - y_centers,
+                      z_grid_for_plotting - z_centers, scalars=displacement_scalars, mode='cylinder',
+                      color=(0.5, 0.5, 0.5), opacity=0.7, scale_mode='vector', scale_factor=1, resolution=24)
+        cylinders_obj.glyph.glyph_source.glyph_source.radius /= 3.4
+        mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting - x_centers, y_grid_for_plotting - y_centers,
+                      z_grid_for_plotting - z_centers, scalars=displacement_scalars, mode='2ddash',
+                      color=(1.0, 0.15, 0.15), opacity=1, scale_mode='vector', scale_factor=1)
+        if timing_bool:
+            print(f"Modeling LIGO took {(time.time() - temp_time):.2f}s")
     
         temp_time = time.time()
-        mlab.view(azimuth=15, elevation=70, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
+        mlab.view(azimuth=45, elevation=70, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
         main_arr = mlab.screenshot(antialiased=True)
         # Resize PiP image
         orig_pip_h, orig_pip_w, _ = pip_arr_large.shape
@@ -649,15 +877,21 @@ def create_merger_movie():
 
     print("All animation frames rendered.")
     print("Compiling movie...")
+    video_clip = moviepy.ImageSequenceClip(frame_files, fps=FPS)
+    audio_clip = moviepy.AudioFileClip(wav_filename)
+    combined_clip = video_clip.with_audio(audio_clip)
+    if combined_clip.duration > audio_clip.duration:
+        combined_clip = combined_clip.with_duration(audio_clip.duration)
+    # Write the result to a file using high-quality, standard codecs.
+    combined_clip.write_videofile(
+        OUTPUT_MOVIE_FILENAME, 
+        codec='libx264', 
+        audio_codec='aac',
+        temp_audiofile='temp-audio.m4a', # Recommended for stability
+        remove_temp=True
+    )
 
-    images = []
-    for f_name in frame_files:
-        if not os.path.exists(f_name):
-            print(f"{f_name} not found")
-            continue
-        images.append(imageio.imread(f_name))
 
-    imageio.mimsave(OUTPUT_MOVIE_FILENAME, images, fps=FPS)
     print(f"Movie saved to {OUTPUT_MOVIE_FILENAME}")
     
     mlab.close(all=True)
