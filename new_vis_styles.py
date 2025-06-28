@@ -13,35 +13,37 @@ import sys
 
 # --- Configuration Parameters ---
 SXS_ID = "SXS:BBH:0001"
-OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_with_noise_and_arms_2.mp4"
+OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_with_noise_and_arms_3.mp4"
 auto_loop_bool = False # option to make many movies
-sxs_idx_start = 308
-loop_size = 4
-NUM_FRAMES = 500
+sxs_idx_start = 164
+loop_size = 3
+NUM_FRAMES = 300
 FPS = 24
 timing_bool = True
+cone_test_bool = False
 
 # Strain Visualization Parameters
 MAX_XYZ = 100.
-POINTS_PER_DIM = 10 # resolution on each axis
+POINTS_PER_DIM = 5 # resolution on each axis
 if POINTS_PER_DIM % 2 == 1:
     POINTS_PER_DIM += 1 # MUST BE EVEN to avoid divide by zero errors/theta pole singularities
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.2, 0.2, 0.2)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
 OPACITY_SPIKE_WIDTH = 0.5 # Width of each opaque-ish region as a percentage of total data range 
-MAX_OPACITY = 0.18
+MAX_OPACITY = 0.25
 BASE_OPACITY = 0.0
 STRAIN_COLORMAP = 'gist_ncar'
 SPIKE_SHAPE = 'gaussian' # options are 'triangle', 'box', or 'gaussian'
-VALUES_TO_BE_OPAQUE = np.array([-1, -0.7, -0.5, -0.32, -0.17, 0.17, 0.32, 0.5, 0.7, 1]) # fractions of peak strain to make an opaque region around
+VALUES_TO_BE_OPAQUE = np.array([-1, -0.7, -0.5, -0.32, -0.19, 0.19, 0.32, 0.5, 0.7, 1]) # fractions of peak strain to make an opaque region around
 # VALUES_TO_BE_OPAQUE = np.delete(np.linspace(0.1, 0.6, 6), 5)
 CLIP_FRAC = 0.9
 
 NUM_RINGS = 1
-RING_SIZE = 0.8 * MAX_XYZ
+ARM_LENGTH = 0.6 * MAX_XYZ
 r_axis = np.array([MAX_XYZ])
-STRAIN_SCALE = 8 * RING_SIZE
+STRAIN_SCALE = 7 * ARM_LENGTH
+CYLINDER_RADIUS = ARM_LENGTH / 1460
 
 PIP_CAMERA_DISTANCE = 30
 MAIN_CAMERA_DISTANCE = MAX_XYZ * 4.5
@@ -368,7 +370,8 @@ def figure_it_out(strain_modes: sxs.waveforms.WaveformModes, lab_time_t: float,
 def generate_ring_cartesian_coords(
     num_observatories: int,
     arm_length: float,
-    radial_axis: np.ndarray
+    radial_axis: np.ndarray,
+    azimuthal_angle: float = np.pi/8
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Generates Cartesian coordinates (x, y, z) for multiple model "LIGOs" (2 orthogonal vectors).
@@ -394,7 +397,7 @@ def generate_ring_cartesian_coords(
         return (np.array([]), np.array([]), np.array([]))
 
     # 1. Define the base angles for ring centers and points within a ring
-    ring_center_phis = np.array([np.pi/4])
+    ring_center_phis = np.array([azimuthal_angle])
 
     # 2. Create 2D grids for observatory center radii and arms using meshgrid.
     # This prepares the data for vectorized operations
@@ -411,9 +414,9 @@ def generate_ring_cartesian_coords(
     y_centers = r_broadcast * np.sin(phi_broadcast)
     z_centers = np.zeros_like(x_centers)
 
-    x_arms = np.array([[[-arm_length, 0]]])
-    y_arms = np.array([[[0, -arm_length]]])
-    z_arms = np.array([[[0, 0]]])
+    x_arms = np.array([[[-np.sin(azimuthal_angle)*arm_length, 0]]])
+    y_arms = np.array([[[np.cos(azimuthal_angle)*arm_length, 0]]])
+    z_arms = np.array([[[0, arm_length]]])
 
     x_cart = x_centers + x_arms
     y_cart = y_centers + y_arms
@@ -433,7 +436,8 @@ def generate_ring_data(
     strain_modes: sxs.waveforms.WaveformModes,
     num_rings: int,
     ring_radius: float,
-    radial_axis: np.ndarray
+    radial_axis: np.ndarray,
+    azimuthal_angle: float = np.pi/8
 ) -> tuple:
     """
     Generates data for points on rings and for the centers of those rings.
@@ -470,7 +474,7 @@ def generate_ring_data(
 
     # The directions of the centers are on the equator (theta=pi/2)
     # with phi angles distributed evenly.
-    ring_center_phis = np.array([np.pi/4])
+    ring_center_phis = np.array([azimuthal_angle])
     center_theta = np.full((num_radii, num_rings), np.pi / 2)
     center_phi = np.tile(ring_center_phis, (num_radii, 1))
     center_directions = np.stack((center_theta, center_phi), axis=-1)
@@ -527,6 +531,9 @@ def disturb_the_points(
     center_phi = center_directions[..., 1]
     cos_theta, sin_theta = np.cos(center_theta), np.sin(center_theta)
     cos_phi, sin_phi = np.cos(center_phi), np.sin(center_phi)
+    """center_x = 
+    center_y = 
+    center_z = """
 
     e_theta_x, e_theta_y, e_theta_z = cos_theta * cos_phi, cos_theta * sin_phi, -sin_theta
     e_phi_x, e_phi_y, e_phi_z = -sin_phi, cos_phi, 0
@@ -587,6 +594,11 @@ def sonify_strain(dom_strain_mode: sxs.waveforms.WaveformModes,
     raw_frequency = angular_velocity_interpolated.ndarray
     idx = np.argmax(amplitude)
     general_multiplier = 15000/raw_frequency[idx]
+    print(general_multiplier)
+    num_points = num_seconds * sample_rate
+    general_multiplier = 15000/raw_frequency[int(idx - 0.01*num_points)]
+    print(general_multiplier)
+
 
     # artistic choice to make the whole range hearable - NEEDS TO BE TUNED
     frequency_to_hear = 1512 * np.log(68 * raw_frequency)
@@ -605,7 +617,7 @@ def sonify_strain(dom_strain_mode: sxs.waveforms.WaveformModes,
     filename = "gravitational_wave_sonification.wav"
     wavfile.write(filename, sample_rate, waveform_16bit)
     print(f"Audio saved to {filename}")
-
+    sys.exit()
 
     return filename
 
@@ -674,7 +686,7 @@ def create_color_opacity_transfer_functions(
     half_width = scalar_width / 2.0
 
     for val in sorted(isosurface_values):
-        opacity_multiplier = abs(val) ** 1/4
+        opacity_multiplier = abs(val) ** 1/5
         val_opacity = max_opacity * opacity_multiplier
         # Normalize the value to sample the colormap
         norm_val = (val/2) + 0.5
@@ -732,7 +744,7 @@ def create_merger_movie():
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
-    start_back_prop = 0.3 # fraction of total sim time to go back from peak strain for the start
+    start_back_prop = 0.15 # fraction of total sim time to go back from peak strain for the start
     end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
@@ -773,12 +785,15 @@ def create_merger_movie():
     bar_top = 0.923
     bar_bottom = 0.149
     bar_height = bar_top - bar_bottom
-    x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(strain_modes_sxs, NUM_RINGS, RING_SIZE, r_axis)
+    x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(strain_modes_sxs, NUM_RINGS, ARM_LENGTH, r_axis)
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
 
     for i_frame, current_lab_time in enumerate(anim_lab_times):
+        if cone_test_bool:
+            if (i_frame != NUM_FRAMES - 1) and (i_frame != 0):
+                continue
         frame_render_start_time = time.time()
         if not auto_loop_bool:
             print(f"Processing frame {i_frame+1}/{NUM_FRAMES} for lab_time = {current_lab_time:.2f} M")
@@ -840,13 +855,14 @@ def create_merger_movie():
         cylinders_obj = mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting - x_centers, y_grid_for_plotting - y_centers,
                       z_grid_for_plotting - z_centers, scalars=displacement_scalars, mode='cylinder',
                       color=(0.5, 0.5, 0.5), opacity=0.7, scale_mode='vector', scale_factor=1, resolution=24)
-        cylinders_obj.glyph.glyph_source.glyph_source.radius /= 3.4
+        cylinders_obj.glyph.glyph_source.glyph_source.radius = CYLINDER_RADIUS# * 60 / 
+        print(cylinders_obj.glyph.glyph_source.glyph_source.radius)
         mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting - x_centers, y_grid_for_plotting - y_centers,
                       z_grid_for_plotting - z_centers, scalars=displacement_scalars, mode='2ddash',
-                      color=(1.0, 0.15, 0.15), opacity=1, scale_mode='vector', scale_factor=1)
+                      color=(1.0, 0.15, 0.15), opacity=1, scale_mode='vector', scale_factor=1, line_width=4.)
         if timing_bool:
             print(f"Modeling LIGO took {(time.time() - temp_time):.2f}s")
-    
+
         temp_time = time.time()
         mlab.view(azimuth=45, elevation=70, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
         main_arr = mlab.screenshot(antialiased=True)
@@ -875,12 +891,17 @@ def create_merger_movie():
         if not auto_loop_bool:
             print(f"Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s.")
 
+    if cone_test_bool:
+        return
     print("All animation frames rendered.")
     print("Compiling movie...")
     video_clip = moviepy.ImageSequenceClip(frame_files, fps=FPS)
     audio_clip = moviepy.AudioFileClip(wav_filename)
     combined_clip = video_clip.with_audio(audio_clip)
     if combined_clip.duration > audio_clip.duration:
+        print(f"Video was {combined_clip.duration:.2f}s long,")
+        print(f"while audio was only {audio_clip.duration:.2f}s.")
+        print("Video cut to audio length.")
         combined_clip = combined_clip.with_duration(audio_clip.duration)
     # Write the result to a file using high-quality, standard codecs.
     combined_clip.write_videofile(
@@ -901,7 +922,7 @@ if __name__ == "__main__":
     if auto_loop_bool:
         for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
             SXS_ID = f"SXS:BBH:{sxs_idx:04d}"
-            OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_strain_volume.mp4"
+            OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_strain_volume_with_noise_and_arms.mp4"
             create_merger_movie()
             
     else:
