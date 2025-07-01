@@ -3,7 +3,8 @@ import sxs
 from mayavi import mlab
 import matplotlib.pyplot as plt
 from tvtk.api import tvtk
-import scipy.io.wavfile as wavfile # Eventually switch over to full moviepy, not urgent
+import h5py
+import scipy # Eventually switch over to full moviepy, not urgent
 import cv2
 import moviepy
 import os
@@ -13,18 +14,23 @@ import sys
 
 # --- Configuration Parameters ---
 SXS_ID = "SXS:BBH:0001"
-OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_with_noise_and_arms_3.mp4"
+OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_with_noise_and_arms_2.mp4"
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 164
 loop_size = 3
-NUM_FRAMES = 300
+NUM_FRAMES = 400
 FPS = 24
-timing_bool = True
+timing_bool = False
 cone_test_bool = False
+RIT_bool = True
+RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
+RIT_STRAIN_SCALE = 35.
+if RIT_bool:
+    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace('/home/guest/Downloads/ExtrapStrain_', '')}_h_volume.mp4"
 
 # Strain Visualization Parameters
 MAX_XYZ = 100.
-POINTS_PER_DIM = 5 # resolution on each axis
+POINTS_PER_DIM = 50 # resolution on each axis
 if POINTS_PER_DIM % 2 == 1:
     POINTS_PER_DIM += 1 # MUST BE EVEN to avoid divide by zero errors/theta pole singularities
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
@@ -42,7 +48,7 @@ CLIP_FRAC = 0.9
 NUM_RINGS = 1
 ARM_LENGTH = 0.6 * MAX_XYZ
 r_axis = np.array([MAX_XYZ])
-STRAIN_SCALE = 7 * ARM_LENGTH
+STRAIN_SCALE = 240
 CYLINDER_RADIUS = ARM_LENGTH / 1460
 
 PIP_CAMERA_DISTANCE = 30
@@ -72,6 +78,57 @@ def load_simulation_data(sxs_id_str):
     else: print(f"Warning: horizons not found or empty for simulation {sxs_id_str}.")
 
     return strain_modes, horizons_data
+
+def load_RIT_data(filename: str, strain_scale: float = 35,
+                  ell_min: int = 2, ell_max: int = 4, spin_weight: int = -2):
+    """
+    Usual format of files is 'NRTimes', then a group for the amplitude of each mode,
+    then a usually empty auxiliary-info group, then a group for the phase of each mode.
+    They seem to have the same deg scalar for constructing the splines, but I haven't seen
+    that confirmed explicitly anywhere, so it's pulled each time. They do have VERY different
+    coarse array sizes, so those CANNOT be used interchangeably.
+    
+    Also note that the modes are ordered -1, ..., -ell, 0, 1, ..., ell which is not
+    the convention SXS uses.
+    """
+    input_h5_file  = h5py.File(filename,'r')
+    intended_time_axis = input_h5_file['NRTimes'][...]
+    num_modes = ((ell_max + 1) ** 2) - (ell_min ** 2)
+    
+    modes_data = np.zeros((len(intended_time_axis), num_modes))
+    for ell in range(ell_min, ell_max + 1):
+        for em in range(-ell, ell + 1):
+            amp_str = f'amp_l{ell}_m{em}'
+            phase_str = f'phase_l{ell}_m{em}'
+            mode_groups = [input_h5_file[amp_str], input_h5_file[phase_str]]
+            amp_then_phase = []
+            for group in mode_groups:
+                coarse_times = group['X'][...]
+                coarse_values = group['Y'][...]
+                interp_degree = group['deg'][...]
+                spline = scipy.interpolate.make_interp_spline(
+                    coarse_times, 
+                    coarse_values, 
+                    k=interp_degree
+                )
+                amp_then_phase.append(spline(intended_time_axis))
+            waveform = amp_then_phase[0] * np.sin(amp_then_phase[1])
+            out_idx = ell + em + (ell ** 2) - (ell_min ** 2)
+            modes_data[:, out_idx] = waveform * strain_scale
+
+            """print(ell, em)
+            plt.plot(intended_time_axis, waveform, label=f'{ell}, {em}')
+        print('\n')
+        plt.legend()
+        plt.show()"""
+
+    strain_waveform_obj = sxs.waveforms.WaveformModes(
+        modes_data, intended_time_axis, time_axis=0, modes_axis=1,
+        ell_min=ell_min, ell_max=ell_max, spin_weight=spin_weight
+    )
+    print(f"Strain modes loaded. Time range: {strain_waveform_obj.t[0]:.2f}M to {strain_waveform_obj.t[-1]:.2f}M.")
+
+    return strain_waveform_obj
 
 def pseudo_uniform_times(
         sample_times: np.ndarray,
@@ -491,6 +548,9 @@ def disturb_the_points(
     x_grid: np.ndarray,
     y_grid: np.ndarray,
     z_grid: np.ndarray,
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
+    z_centers: np.ndarray,
     center_directions: np.ndarray,
     radial_axis: np.ndarray,
     lab_time: float,
@@ -529,6 +589,7 @@ def disturb_the_points(
     # This ensures the "stretch" and "squeeze" axes are the same for all points on one ring.
     center_theta = center_directions[..., 0]
     center_phi = center_directions[..., 1]
+
     cos_theta, sin_theta = np.cos(center_theta), np.sin(center_theta)
     cos_phi, sin_phi = np.cos(center_phi), np.sin(center_phi)
     """center_x = 
@@ -569,16 +630,16 @@ def disturb_the_points(
     delta_z = h_xz[:, :, np.newaxis] * x_grid + h_yz[:, :, np.newaxis] * y_grid + h_zz[:, :, np.newaxis] * z_grid
 
     # 6. Apply the displacement to the Cartesian grid objects
-    x_grid_out = x_grid + delta_x
-    y_grid_out = y_grid + delta_y
-    z_grid_out = z_grid + delta_z
+    x_grid_out = x_grid + delta_x - x_centers
+    y_grid_out = y_grid + delta_y - y_centers
+    z_grid_out = z_grid + delta_z - z_centers
 
-    displacement_scalars = np.sqrt((delta_x ** 2) + (delta_y ** 2) + (delta_z ** 2))
+    length_scalars = np.sqrt((x_grid_out ** 2) + (y_grid_out ** 2) + (z_grid_out ** 2))
 
-    return  x_grid_out, y_grid_out, z_grid_out, delta_x, delta_y, delta_z, displacement_scalars
+    return x_grid_out, y_grid_out, z_grid_out, delta_x, delta_y, delta_z, length_scalars
 
 
-def sonify_strain(dom_strain_mode: sxs.waveforms.WaveformModes,
+def sonify_strain_sxs(dom_strain_mode: sxs.TimeSeries,
                 angular_velocity_TS: sxs.TimeSeries,
                 anim_time_indices: np.ndarray,
                 num_seconds: float,
@@ -593,11 +654,9 @@ def sonify_strain(dom_strain_mode: sxs.waveforms.WaveformModes,
 
     raw_frequency = angular_velocity_interpolated.ndarray
     idx = np.argmax(amplitude)
-    general_multiplier = 15000/raw_frequency[idx]
-    print(general_multiplier)
     num_points = num_seconds * sample_rate
-    general_multiplier = 15000/raw_frequency[int(idx - 0.01*num_points)]
-    print(general_multiplier)
+    general_multiplier = 8000/raw_frequency[int(idx - 0.01*num_points)]
+
 
 
     # artistic choice to make the whole range hearable - NEEDS TO BE TUNED
@@ -614,12 +673,15 @@ def sonify_strain(dom_strain_mode: sxs.waveforms.WaveformModes,
     waveform_16bit = np.int16(waveform * 32767)
 
     # Save the Audio File
-    filename = "gravitational_wave_sonification.wav"
-    wavfile.write(filename, sample_rate, waveform_16bit)
+    filename = "gravitational_wave_sonification_sxs.wav"
+    scipy.io.wavfile.write(filename, sample_rate, waveform_16bit)
     print(f"Audio saved to {filename}")
     sys.exit()
-
     return filename
+
+
+def sonify_strain_RIT(dom_strain_mode):
+    return "gravitational_wave_sonification.wav"
 
 
 def create_color_opacity_transfer_functions(
@@ -740,18 +802,20 @@ def create_color_opacity_transfer_functions(
 # --- Main Animation Logic ---
 def create_merger_movie():
     script_init_time = time.time()
-    strain_modes_sxs, horizons_data = load_simulation_data(SXS_ID)
+    if RIT_bool: strain_modes_obj = load_RIT_data(RIT_filename, RIT_STRAIN_SCALE)
+    else: strain_modes_obj, horizons_data = load_simulation_data(SXS_ID)
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
-    start_back_prop = 0.15 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
+    start_back_prop = 0.3 # fraction of total sim time to go back from peak strain for the start
+    end_for_prop = 0.13 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
-    common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
-    h_lm_signal = strain_modes_sxs[:, strain_modes_sxs.index(dom_l, dom_m)]
-    peak_strain_time = strain_modes_sxs.max_norm_time()
-    sample_times = strain_modes_sxs.t
+    if RIT_bool: common_horizon_start = 0.0
+    else: common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
+    h_lm_signal = strain_modes_obj[:, strain_modes_obj.index(dom_l, dom_m)]
+    peak_strain_time = strain_modes_obj.max_norm_time()
+    sample_times = strain_modes_obj.t
 
     anim_lab_times, anim_time_indices = pseudo_uniform_times(sample_times, peak_strain_time, start_back_prop, end_for_prop)
     print(f"Animation time: {anim_lab_times[0]:.2f}M to {anim_lab_times[-1]:.2f}M over {len(anim_lab_times)} frames.")
@@ -766,15 +830,18 @@ def create_merger_movie():
     r_grid = np.sqrt((x_grid ** 2) + (y_grid ** 2) + (z_grid ** 2))
     theta_grid = np.arctan(np.sqrt((x_grid ** 2) + (y_grid ** 2))/z_grid)
     phi_grid = np.arctan(y_grid/x_grid)
-    _, min_strain, max_strain = figure_it_out(strain_modes_sxs, peak_strain_time, x_grid, y_grid,
+    _, min_strain, max_strain = figure_it_out(strain_modes_obj, peak_strain_time, x_grid, y_grid,
                                     z_grid, r_grid, theta_grid, phi_grid)
     print(min_strain, max_strain)
     max_strain, min_strain = CLIP_FRAC*max_strain, CLIP_FRAC*min_strain
     avg_peak_strain_amp = (max_strain - min_strain)/2
-    bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
-    spin_arrow_size *= 7
+    if not RIT_bool:
+        bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(
+        horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
+        spin_arrow_size *= 7
 
-    wav_filename = sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
+    if RIT_bool: wav_filename = sonify_strain_RIT(h_lm_signal)
+    else: wav_filename = sonify_strain_sxs(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
     frame_files = []
     frames_dir_path = "frames"
     os.makedirs(frames_dir_path, exist_ok=True)
@@ -785,7 +852,7 @@ def create_merger_movie():
     bar_top = 0.923
     bar_bottom = 0.149
     bar_height = bar_top - bar_bottom
-    x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(strain_modes_sxs, NUM_RINGS, ARM_LENGTH, r_axis)
+    x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(strain_modes_obj, NUM_RINGS, ARM_LENGTH, r_axis)
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
@@ -800,40 +867,41 @@ def create_merger_movie():
         
         lab_time_step = current_lab_time - anim_lab_times[i_frame - 1] # It will be the whole animation time on frame 0, but is not used then
         temp_time = time.time()
-        strain_grid, _, _ = figure_it_out(strain_modes_sxs, current_lab_time, x_grid, y_grid,
+        strain_grid, _, _ = figure_it_out(strain_modes_obj, current_lab_time, x_grid, y_grid,
                                     z_grid, r_grid, theta_grid, phi_grid)
         x_grid_for_plotting, y_grid_for_plotting, z_grid_for_plotting, x_displace, y_displace, z_displace, displacement_scalars = disturb_the_points(
-            strain_at_centers, x_LIGO, y_LIGO, z_LIGO, center_directions, r_axis, current_lab_time, STRAIN_SCALE)
+            strain_at_centers, x_LIGO, y_LIGO, z_LIGO, x_centers, y_centers, z_centers, center_directions, r_axis, current_lab_time, STRAIN_SCALE)
         if timing_bool:
             print(f"Evaluating strain grid took {(time.time() - temp_time):.2f}s")
         mlab.clf()
 
-        temp_time = time.time()
-        if current_lab_time < common_horizon_start:
-            # plot BH1
-            mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
-            spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1', opacity=0.7)
-            # plot BH2
-            mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 2')
-            spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2', opacity=0.7)
-
-        else:
-            # plot merged BH
-            mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
-            spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3', opacity=0.7)
-        if timing_bool:
-            print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
-
+        if not RIT_bool:
+            temp_time = time.time()
+            if current_lab_time < common_horizon_start:
+                # plot BH1
+                mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
+                spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
+                            line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1', opacity=0.7)
+                # plot BH2
+                mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 2')
+                spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
+                            line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2', opacity=0.7)
+            else:
+                # plot merged BH
+                mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
+                spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
+                            line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3', opacity=0.7)
+            if timing_bool:
+                print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
         mlab.view(azimuth=45, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,BH_ELEVATION))
         pip_arr_large = mlab.screenshot(antialiased=True)
-        if current_lab_time < common_horizon_start:
-            spin1_obj.remove()
-            spin2_obj.remove()
-        else:
-            spin3_obj.remove()
+
+        if not RIT_bool:
+            if current_lab_time < common_horizon_start:
+                spin1_obj.remove()
+                spin2_obj.remove()
+            else:
+                spin3_obj.remove()
 
         # plot strain volume
         temp_time = time.time()
@@ -852,13 +920,23 @@ def create_merger_movie():
 
         temp_time = time.time()
         mlab.points3d(x_centers, y_centers, z_centers, mode='cube', color=(0.45, 0.45, 0.45), scale_factor=8, opacity=0.9)
-        cylinders_obj = mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting - x_centers, y_grid_for_plotting - y_centers,
-                      z_grid_for_plotting - z_centers, scalars=displacement_scalars, mode='cylinder',
-                      color=(0.5, 0.5, 0.5), opacity=0.7, scale_mode='vector', scale_factor=1, resolution=24)
-        cylinders_obj.glyph.glyph_source.glyph_source.radius = CYLINDER_RADIUS# * 60 / 
-        print(cylinders_obj.glyph.glyph_source.glyph_source.radius)
-        mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting - x_centers, y_grid_for_plotting - y_centers,
-                      z_grid_for_plotting - z_centers, scalars=displacement_scalars, mode='2ddash',
+        cylinder1_obj = mlab.quiver3d(x_centers[..., 0], y_centers[..., 0], z_centers[..., 0],
+                                      x_grid_for_plotting[..., 0], y_grid_for_plotting[..., 0],
+                                      z_grid_for_plotting[..., 0], scalars=displacement_scalars[..., 0],
+                                      mode='cylinder', color=(0.5, 0.5, 0.5), opacity=0.7,
+                                      scale_mode='vector', scale_factor=1, resolution=24)
+        adjustment_factor = ARM_LENGTH / displacement_scalars[0, 0, 0]
+        cylinder1_obj.glyph.glyph_source.glyph_source.radius = CYLINDER_RADIUS * adjustment_factor
+
+        cylinder2_obj = mlab.quiver3d(x_centers[..., 1], y_centers[..., 1], z_centers[..., 1],
+                                      x_grid_for_plotting[..., 1], y_grid_for_plotting[..., 1],
+                                      z_grid_for_plotting[..., 1], scalars=displacement_scalars[..., 1],
+                                      mode='cylinder', color=(0.5, 0.5, 0.5), opacity=0.7,
+                                      scale_mode='vector', scale_factor=1, resolution=24)
+        adjustment_factor = ARM_LENGTH / displacement_scalars[0, 0, 1]
+        cylinder2_obj.glyph.glyph_source.glyph_source.radius = CYLINDER_RADIUS * adjustment_factor
+        mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting, y_grid_for_plotting,
+                      z_grid_for_plotting, scalars=displacement_scalars, mode='2ddash',
                       color=(1.0, 0.15, 0.15), opacity=1, scale_mode='vector', scale_factor=1, line_width=4.)
         if timing_bool:
             print(f"Modeling LIGO took {(time.time() - temp_time):.2f}s")
@@ -892,7 +970,9 @@ def create_merger_movie():
             print(f"Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s.")
 
     if cone_test_bool:
+        mlab.close(all=True)
         return
+    
     print("All animation frames rendered.")
     print("Compiling movie...")
     video_clip = moviepy.ImageSequenceClip(frame_files, fps=FPS)
@@ -912,7 +992,6 @@ def create_merger_movie():
         remove_temp=True
     )
 
-
     print(f"Movie saved to {OUTPUT_MOVIE_FILENAME}")
     
     mlab.close(all=True)
@@ -920,9 +999,10 @@ def create_merger_movie():
 
 if __name__ == "__main__":
     if auto_loop_bool:
-        for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
+        #for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
+        for sxs_idx in [1, 165, 166, 150]:
             SXS_ID = f"SXS:BBH:{sxs_idx:04d}"
-            OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_strain_volume_with_noise_and_arms.mp4"
+            OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_g_volume_with_noise_and_arms_auto.mp4"
             create_merger_movie()
             
     else:
