@@ -18,13 +18,12 @@ OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_with_noise_and_arm
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 164
 loop_size = 3
-NUM_FRAMES = 400
+NUM_FRAMES = 300
 FPS = 24
 timing_bool = False
 cone_test_bool = False
 RIT_bool = True
-RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
-RIT_STRAIN_SCALE = 35.
+RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-eBBH-1460-n100.h5'
 if RIT_bool:
     OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace('/home/guest/Downloads/ExtrapStrain_', '')}_h_volume.mp4"
 
@@ -36,20 +35,22 @@ if POINTS_PER_DIM % 2 == 1:
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.2, 0.2, 0.2)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
-OPACITY_SPIKE_WIDTH = 0.5 # Width of each opaque-ish region as a percentage of total data range 
-MAX_OPACITY = 0.25
+OPACITY_SPIKE_WIDTH = 0.8 # Width of each opaque-ish region as a percentage of total data range 
+MAX_OPACITY = 0.4
 BASE_OPACITY = 0.0
 STRAIN_COLORMAP = 'gist_ncar'
-SPIKE_SHAPE = 'gaussian' # options are 'triangle', 'box', or 'gaussian'
-VALUES_TO_BE_OPAQUE = np.array([-1, -0.7, -0.5, -0.32, -0.19, 0.19, 0.32, 0.5, 0.7, 1]) # fractions of peak strain to make an opaque region around
+SPIKE_SHAPE = 'triangle' # options are 'triangle', 'box', or 'gaussian'
+VALUES_TO_BE_OPAQUE = np.array([-0.6, -0.35, 0.35, 0.6]) # fractions of peak strain to make an opaque region around
 # VALUES_TO_BE_OPAQUE = np.delete(np.linspace(0.1, 0.6, 6), 5)
 CLIP_FRAC = 0.9
 
 NUM_RINGS = 1
 ARM_LENGTH = 0.6 * MAX_XYZ
 r_axis = np.array([MAX_XYZ])
-STRAIN_SCALE = 240
-CYLINDER_RADIUS = ARM_LENGTH / 1460
+AZIMUTHAL_ANGLE = np.pi/10
+STRAIN_SCALE = 2.4 * MAX_XYZ
+RIT_STRAIN_SCALE = MAX_XYZ / 5
+CYLINDER_RADIUS = 0.04 # Relative to scale of the glyph
 
 PIP_CAMERA_DISTANCE = 30
 MAIN_CAMERA_DISTANCE = MAX_XYZ * 4.5
@@ -79,8 +80,9 @@ def load_simulation_data(sxs_id_str):
 
     return strain_modes, horizons_data
 
-def load_RIT_data(filename: str, strain_scale: float = 35,
-                  ell_min: int = 2, ell_max: int = 4, spin_weight: int = -2):
+def load_RIT_data(filename: str, strain_scale: float = 35, ell_min: int = 2,
+                  ell_max: int = 4, spin_weight: int = -2,
+                  dom_ell: int = 2, dom_em: int = 2):
     """
     Usual format of files is 'NRTimes', then a group for the amplitude of each mode,
     then a usually empty auxiliary-info group, then a group for the phase of each mode.
@@ -94,41 +96,57 @@ def load_RIT_data(filename: str, strain_scale: float = 35,
     input_h5_file  = h5py.File(filename,'r')
     intended_time_axis = input_h5_file['NRTimes'][...]
     num_modes = ((ell_max + 1) ** 2) - (ell_min ** 2)
-    
-    modes_data = np.zeros((len(intended_time_axis), num_modes))
+
+    dom_phase_group = input_h5_file[f'phase_l{dom_ell}_m{dom_em}']
+    dom_phase_spline = scipy.interpolate.make_interp_spline(
+        dom_phase_group['X'][...],
+        dom_phase_group['Y'][...], # note: RIT data has DECREASING phase
+        k=dom_phase_group['deg'][...]
+    )
+    angular_phase = dom_phase_spline(intended_time_axis)
+    omega_spline = dom_phase_spline.derivative()
+    angular_velocity_BHs = 0.5 * omega_spline(intended_time_axis)
+    omega_calculated_TS = sxs.TimeSeries(angular_velocity_BHs, intended_time_axis)
+
+    """plt.plot(intended_time_axis, angular_phase, label='phase')
+    # plt.plot(intended_time_axis, angular_velocity_BHs, label='omega')
+    plt.legend()
+    plt.show()"""
+
+    modes_data = np.zeros((len(intended_time_axis), num_modes), dtype=complex)
     for ell in range(ell_min, ell_max + 1):
         for em in range(-ell, ell + 1):
-            amp_str = f'amp_l{ell}_m{em}'
-            phase_str = f'phase_l{ell}_m{em}'
-            mode_groups = [input_h5_file[amp_str], input_h5_file[phase_str]]
-            amp_then_phase = []
-            for group in mode_groups:
-                coarse_times = group['X'][...]
-                coarse_values = group['Y'][...]
-                interp_degree = group['deg'][...]
-                spline = scipy.interpolate.make_interp_spline(
-                    coarse_times, 
-                    coarse_values, 
-                    k=interp_degree
+            amp_group = input_h5_file[f'amp_l{ell}_m{em}']
+            phase_group = input_h5_file[f'phase_l{ell}_m{em}']
+            amp_spline = scipy.interpolate.make_interp_spline(
+                    amp_group['X'][...],
+                    amp_group['Y'][...],
+                    k=amp_group['deg'][...]
                 )
-                amp_then_phase.append(spline(intended_time_axis))
-            waveform = amp_then_phase[0] * np.sin(amp_then_phase[1])
+            amp_t_array = amp_spline(intended_time_axis)
+            phase_spline = scipy.interpolate.make_interp_spline(
+                    phase_group['X'][...],
+                    phase_group['Y'][...],
+                    k=phase_group['deg'][...]
+                )
+            phase_t_array = phase_spline(intended_time_axis)
+            waveform = amp_t_array * np.exp(1j * phase_t_array)
             out_idx = ell + em + (ell ** 2) - (ell_min ** 2)
             modes_data[:, out_idx] = waveform * strain_scale
 
-            """print(ell, em)
+            print(ell, em, out_idx)
             plt.plot(intended_time_axis, waveform, label=f'{ell}, {em}')
         print('\n')
         plt.legend()
-        plt.show()"""
+        plt.show()
 
-    strain_waveform_obj = sxs.waveforms.WaveformModes(
+    strain_waveforms_obj = sxs.waveforms.WaveformModes(
         modes_data, intended_time_axis, time_axis=0, modes_axis=1,
         ell_min=ell_min, ell_max=ell_max, spin_weight=spin_weight
     )
-    print(f"Strain modes loaded. Time range: {strain_waveform_obj.t[0]:.2f}M to {strain_waveform_obj.t[-1]:.2f}M.")
+    print(f"Strain modes loaded. Time range: {strain_waveforms_obj.t[0]:.2f}M to {strain_waveforms_obj.t[-1]:.2f}M.")
 
-    return strain_waveform_obj
+    return strain_waveforms_obj, omega_calculated_TS
 
 def pseudo_uniform_times(
         sample_times: np.ndarray,
@@ -639,7 +657,7 @@ def disturb_the_points(
     return x_grid_out, y_grid_out, z_grid_out, delta_x, delta_y, delta_z, length_scalars
 
 
-def sonify_strain_sxs(dom_strain_mode: sxs.TimeSeries,
+def sonify_strain(dom_strain_mode: sxs.TimeSeries,
                 angular_velocity_TS: sxs.TimeSeries,
                 anim_time_indices: np.ndarray,
                 num_seconds: float,
@@ -655,12 +673,9 @@ def sonify_strain_sxs(dom_strain_mode: sxs.TimeSeries,
     raw_frequency = angular_velocity_interpolated.ndarray
     idx = np.argmax(amplitude)
     num_points = num_seconds * sample_rate
+
+    # artistic choice to make the whole range hearable
     general_multiplier = 8000/raw_frequency[int(idx - 0.01*num_points)]
-
-
-
-    # artistic choice to make the whole range hearable - NEEDS TO BE TUNED
-    frequency_to_hear = 1512 * np.log(68 * raw_frequency)
     frequency_to_hear = general_multiplier * raw_frequency
     phase = np.cumsum(frequency_to_hear / sample_rate)
 
@@ -673,15 +688,11 @@ def sonify_strain_sxs(dom_strain_mode: sxs.TimeSeries,
     waveform_16bit = np.int16(waveform * 32767)
 
     # Save the Audio File
-    filename = "gravitational_wave_sonification_sxs.wav"
+    filename = "gravitational_wave_sonification.wav"
     scipy.io.wavfile.write(filename, sample_rate, waveform_16bit)
     print(f"Audio saved to {filename}")
-    sys.exit()
+
     return filename
-
-
-def sonify_strain_RIT(dom_strain_mode):
-    return "gravitational_wave_sonification.wav"
 
 
 def create_color_opacity_transfer_functions(
@@ -802,13 +813,13 @@ def create_color_opacity_transfer_functions(
 # --- Main Animation Logic ---
 def create_merger_movie():
     script_init_time = time.time()
-    if RIT_bool: strain_modes_obj = load_RIT_data(RIT_filename, RIT_STRAIN_SCALE)
+    if RIT_bool: strain_modes_obj, orbital_vel_TS = load_RIT_data(RIT_filename, RIT_STRAIN_SCALE)
     else: strain_modes_obj, horizons_data = load_simulation_data(SXS_ID)
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
-    start_back_prop = 0.3 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.13 # fraction of total sim time to go forwards from peak strain for the end
+    start_back_prop = 0.6 # fraction of total sim time to go back from peak strain for the start
+    end_for_prop = 0.1 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
     if RIT_bool: common_horizon_start = 0.0
@@ -840,8 +851,7 @@ def create_merger_movie():
         horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
         spin_arrow_size *= 7
 
-    if RIT_bool: wav_filename = sonify_strain_RIT(h_lm_signal)
-    else: wav_filename = sonify_strain_sxs(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
+    wav_filename = sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
     frame_files = []
     frames_dir_path = "frames"
     os.makedirs(frames_dir_path, exist_ok=True)
@@ -852,7 +862,8 @@ def create_merger_movie():
     bar_top = 0.923
     bar_bottom = 0.149
     bar_height = bar_top - bar_bottom
-    x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(strain_modes_obj, NUM_RINGS, ARM_LENGTH, r_axis)
+    x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(
+        strain_modes_obj, NUM_RINGS, ARM_LENGTH, r_axis, AZIMUTHAL_ANGLE)
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
@@ -919,7 +930,7 @@ def create_merger_movie():
             print(f"Rendering strain volume took {(time.time() - temp_time):.2f}s")
 
         temp_time = time.time()
-        mlab.points3d(x_centers, y_centers, z_centers, mode='cube', color=(0.45, 0.45, 0.45), scale_factor=8, opacity=0.9)
+        mlab.points3d(x_centers, y_centers, z_centers, mode='cube', color=(0.45, 0.45, 0.45), scale_factor=MAX_XYZ/12.5, opacity=0.9)
         cylinder1_obj = mlab.quiver3d(x_centers[..., 0], y_centers[..., 0], z_centers[..., 0],
                                       x_grid_for_plotting[..., 0], y_grid_for_plotting[..., 0],
                                       z_grid_for_plotting[..., 0], scalars=displacement_scalars[..., 0],
@@ -949,7 +960,7 @@ def create_merger_movie():
         new_pip_h, new_pip_w = int(orig_pip_h / PIP_SCALE), int(orig_pip_w / PIP_SCALE)
         pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
         # Paste the resized PiP array onto the main array
-        main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
+        # main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
         w_buff = 10
         progress_plot_w, progress_plot_h = int(orig_pip_w - 2*w_buff), int(orig_pip_h // PROGRESS_WAVE_SCALE)
 
