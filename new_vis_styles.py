@@ -14,22 +14,23 @@ import sys
 
 # --- Configuration Parameters ---
 SXS_ID = "SXS:BBH:0001"
-OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_with_noise_and_arms_2.mp4"
+OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_uniform_times.mp4"
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 164
 loop_size = 3
-NUM_FRAMES = 300
+NUM_FRAMES = 400
 FPS = 24
 timing_bool = False
+colorbar_bool = False
 cone_test_bool = False
 RIT_bool = True
-RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-eBBH-1460-n100.h5'
+RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
 if RIT_bool:
-    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace('/home/guest/Downloads/ExtrapStrain_', '')}_h_volume.mp4"
+    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace('/home/guest/Downloads/ExtrapStrain_', '')}_h_volume_uniform_times.mp4"
 
 # Strain Visualization Parameters
-MAX_XYZ = 100.
-POINTS_PER_DIM = 50 # resolution on each axis
+MAX_XYZ = 40.
+POINTS_PER_DIM = 40 # resolution on each axis
 if POINTS_PER_DIM % 2 == 1:
     POINTS_PER_DIM += 1 # MUST BE EVEN to avoid divide by zero errors/theta pole singularities
 GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
@@ -40,7 +41,7 @@ MAX_OPACITY = 0.4
 BASE_OPACITY = 0.0
 STRAIN_COLORMAP = 'gist_ncar'
 SPIKE_SHAPE = 'triangle' # options are 'triangle', 'box', or 'gaussian'
-VALUES_TO_BE_OPAQUE = np.array([-0.6, -0.35, 0.35, 0.6]) # fractions of peak strain to make an opaque region around
+VALUES_TO_BE_OPAQUE = np.array([0.95, -0.55, -0.35, -0.17, 0.17, 0.35, 0.55, 0.95]) # fractions of peak strain to make an opaque region around
 # VALUES_TO_BE_OPAQUE = np.delete(np.linspace(0.1, 0.6, 6), 5)
 CLIP_FRAC = 0.9
 
@@ -49,7 +50,7 @@ ARM_LENGTH = 0.6 * MAX_XYZ
 r_axis = np.array([MAX_XYZ])
 AZIMUTHAL_ANGLE = np.pi/10
 STRAIN_SCALE = 2.4 * MAX_XYZ
-RIT_STRAIN_SCALE = MAX_XYZ / 5
+RIT_STRAIN_SCALE = MAX_XYZ / 70
 CYLINDER_RADIUS = 0.04 # Relative to scale of the glyph
 
 PIP_CAMERA_DISTANCE = 30
@@ -103,13 +104,12 @@ def load_RIT_data(filename: str, strain_scale: float = 35, ell_min: int = 2,
         dom_phase_group['Y'][...], # note: RIT data has DECREASING phase
         k=dom_phase_group['deg'][...]
     )
-    angular_phase = dom_phase_spline(intended_time_axis)
+
     omega_spline = dom_phase_spline.derivative()
-    angular_velocity_BHs = 0.5 * omega_spline(intended_time_axis)
+    angular_velocity_BHs = -0.5 * omega_spline(intended_time_axis)
     omega_calculated_TS = sxs.TimeSeries(angular_velocity_BHs, intended_time_axis)
 
-    """plt.plot(intended_time_axis, angular_phase, label='phase')
-    # plt.plot(intended_time_axis, angular_velocity_BHs, label='omega')
+    """plt.plot(intended_time_axis, angular_velocity_BHs, label='omega')
     plt.legend()
     plt.show()"""
 
@@ -134,11 +134,17 @@ def load_RIT_data(filename: str, strain_scale: float = 35, ell_min: int = 2,
             out_idx = ell + em + (ell ** 2) - (ell_min ** 2)
             modes_data[:, out_idx] = waveform * strain_scale
 
-            print(ell, em, out_idx)
-            plt.plot(intended_time_axis, waveform, label=f'{ell}, {em}')
+            """if abs(em) == 2:
+                print(ell, em, out_idx)
+                plt.plot(intended_time_axis, phase_t_array, label=f'm{em} phase')
+        plt.legend()
+        plt.show()"""
+
+        """print(ell, em, out_idx)
+        plt.plot(intended_time_axis, amp_t_array, label=f'{ell}, {em}')
         print('\n')
         plt.legend()
-        plt.show()
+        plt.show()"""
 
     strain_waveforms_obj = sxs.waveforms.WaveformModes(
         modes_data, intended_time_axis, time_axis=0, modes_axis=1,
@@ -170,7 +176,7 @@ def pseudo_uniform_times(
     anim_time_indices = np.searchsorted(sample_times, uniform_time_array)
     anim_time_array = sample_times[anim_time_indices]
 
-    return anim_time_array, anim_time_indices
+    return uniform_time_array, anim_time_indices
 
 
 def make_progress_signal_plot(dom_mode_signal: sxs.waveforms.WaveformModes,
@@ -610,9 +616,6 @@ def disturb_the_points(
 
     cos_theta, sin_theta = np.cos(center_theta), np.sin(center_theta)
     cos_phi, sin_phi = np.cos(center_phi), np.sin(center_phi)
-    """center_x = 
-    center_y = 
-    center_z = """
 
     e_theta_x, e_theta_y, e_theta_z = cos_theta * cos_phi, cos_theta * sin_phi, -sin_theta
     e_phi_x, e_phi_y, e_phi_z = -sin_phi, cos_phi, 0
@@ -663,25 +666,30 @@ def sonify_strain(dom_strain_mode: sxs.TimeSeries,
                 num_seconds: float,
                 sample_rate = 44100
 ):
+    num_points = int(num_seconds * sample_rate)
     trimmed_strain_signal = dom_strain_mode[anim_time_indices[0]:(anim_time_indices[-1] + 1)]
     sample_times = trimmed_strain_signal.t
-    uniform_time_array = np.linspace(sample_times[0], sample_times[-1], int(sample_rate * num_seconds))
+    uniform_time_array = np.linspace(sample_times[0], sample_times[-1], num_points)
     uniform_strain_array = trimmed_strain_signal.interpolate(uniform_time_array)
     amplitude = uniform_strain_array.abs.ndarray
     angular_velocity_interpolated = angular_velocity_TS.interpolate(uniform_time_array)
 
     raw_frequency = angular_velocity_interpolated.ndarray
-    idx = np.argmax(amplitude)
-    num_points = num_seconds * sample_rate
+    peak_amp_idx = np.argmax(amplitude)
 
     # artistic choice to make the whole range hearable
-    general_multiplier = 8000/raw_frequency[int(idx - 0.01*num_points)]
+    general_multiplier = 5000/raw_frequency[int(peak_amp_idx - 0.01*num_points)]
     frequency_to_hear = general_multiplier * raw_frequency
+    print(raw_frequency[int(peak_amp_idx - 0.01*num_points)], general_multiplier, frequency_to_hear[peak_amp_idx])
     phase = np.cumsum(frequency_to_hear / sample_rate)
 
     amplitude_normalized = amplitude / np.max(amplitude)
+    cut_idx = num_points - np.searchsorted(np.flip(amplitude_normalized[peak_amp_idx:]), 0.25)
+    print(cut_idx, peak_amp_idx, num_points)
+    amp_norm_cut = np.zeros_like(amplitude_normalized)
+    amp_norm_cut[:cut_idx] = amplitude_normalized[:cut_idx]
     # waveform = A(t) * sin(phase(t))
-    waveform = amplitude_normalized * np.sin(phase)
+    waveform = amp_norm_cut * np.sin(phase)
 
     # Convert to 16-bit integer format (for WAV file)
     # The range for 16-bit is -32768 to 32767
@@ -818,8 +826,8 @@ def create_merger_movie():
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
-    start_back_prop = 0.6 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.1 # fraction of total sim time to go forwards from peak strain for the end
+    start_back_prop = 0.65 # fraction of total sim time to go back from peak strain for the start
+    end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
     if RIT_bool: common_horizon_start = 0.0
@@ -867,6 +875,7 @@ def create_merger_movie():
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     print("Starting frame rendering loop...")
+    strain_displacement_array = np.zeros((2, NUM_FRAMES))
 
     for i_frame, current_lab_time in enumerate(anim_lab_times):
         if cone_test_bool:
@@ -922,10 +931,11 @@ def create_merger_movie():
         volume_property.set_scalar_opacity(opacity_transfer_function)
         volume_property.set_color(color_transfer_function)
         strain_cloud.module_manager.scalar_lut_manager.lut.table = colorbar_lut
-        mlab.colorbar(object=strain_cloud, orientation='vertical', nb_labels=0)
-        mlab.text(0.01, 0.96, "Real Polarized Strain (unscaled)", width=0.33, line_width=6)
-        for frac in VALUES_TO_BE_OPAQUE:
-            mlab.text(0.053, bar_bottom + ((frac/2) + 0.5)*bar_height, f"{(frac*avg_peak_strain_amp):.3f}", width=0.05)
+        if colorbar_bool:
+            mlab.colorbar(object=strain_cloud, orientation='vertical', nb_labels=0)
+            mlab.text(0.01, 0.96, "Real Polarized Strain (unscaled)", width=0.33, line_width=6)
+            for frac in VALUES_TO_BE_OPAQUE:
+                mlab.text(0.053, bar_bottom + ((frac/2) + 0.5)*bar_height, f"{(frac*avg_peak_strain_amp):.3f}", width=0.05)
         if timing_bool:
             print(f"Rendering strain volume took {(time.time() - temp_time):.2f}s")
 
@@ -952,6 +962,8 @@ def create_merger_movie():
         if timing_bool:
             print(f"Modeling LIGO took {(time.time() - temp_time):.2f}s")
 
+        strain_displacement_array[:, i_frame] = np.squeeze(displacement_scalars)
+
         temp_time = time.time()
         mlab.view(azimuth=45, elevation=70, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
         main_arr = mlab.screenshot(antialiased=True)
@@ -960,7 +972,8 @@ def create_merger_movie():
         new_pip_h, new_pip_w = int(orig_pip_h / PIP_SCALE), int(orig_pip_w / PIP_SCALE)
         pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
         # Paste the resized PiP array onto the main array
-        # main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
+        if not RIT_bool:
+            main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
         w_buff = 10
         progress_plot_w, progress_plot_h = int(orig_pip_w - 2*w_buff), int(orig_pip_h // PROGRESS_WAVE_SCALE)
 
@@ -983,6 +996,11 @@ def create_merger_movie():
     if cone_test_bool:
         mlab.close(all=True)
         return
+
+    plt.plot(anim_lab_times, strain_displacement_array[0, :], label='plane arm')
+    plt.plot(anim_lab_times, strain_displacement_array[1, :], label='z arm')
+    plt.legend()
+    plt.show()
     
     print("All animation frames rendered.")
     print("Compiling movie...")
@@ -1011,10 +1029,13 @@ def create_merger_movie():
 if __name__ == "__main__":
     if auto_loop_bool:
         #for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
-        for sxs_idx in [1, 165, 166, 150]:
-            SXS_ID = f"SXS:BBH:{sxs_idx:04d}"
-            OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_g_volume_with_noise_and_arms_auto.mp4"
-            create_merger_movie()
+        if not RIT_bool:
+            for sxs_idx in [1, 165, 166, 150]:
+                SXS_ID = f"SXS:BBH:{sxs_idx:04d}"
+                OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_g_volume_with_noise_and_arms_auto.mp4"
+                create_merger_movie()
+        else:
+            print("Can't loop for RIT simulations. Strain scale varies too much")
             
     else:
         create_merger_movie()
