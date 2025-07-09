@@ -8,6 +8,7 @@ import scipy # Eventually switch over to full moviepy, not urgent
 import cv2
 import moviepy
 import os
+import copy
 import time
 import inspect
 import sys
@@ -25,6 +26,7 @@ colorbar_bool = False
 cone_test_bool = False
 RIT_bool = True
 RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
+metadata_filename = '/home/guest/Downloads/RIT_BBH_0001-n100-id3_Metadata.txt'
 if RIT_bool:
     OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace('/home/guest/Downloads/ExtrapStrain_', '')}_h_volume_uniform_times.mp4"
 
@@ -81,7 +83,8 @@ def load_simulation_data(sxs_id_str):
 
     return strain_modes, horizons_data
 
-def load_RIT_data(filename: str, strain_scale: float = 35, ell_min: int = 2,
+def load_RIT_data(strain_filepath: str, metadata_filepath:str,
+                  strain_scale: float = 35, ell_min: int = 2,
                   ell_max: int = 4, spin_weight: int = -2,
                   dom_ell: int = 2, dom_em: int = 2):
     """
@@ -94,7 +97,7 @@ def load_RIT_data(filename: str, strain_scale: float = 35, ell_min: int = 2,
     Also note that the modes are ordered -1, ..., -ell, 0, 1, ..., ell which is not
     the convention SXS uses.
     """
-    input_h5_file  = h5py.File(filename,'r')
+    input_h5_file  = h5py.File(strain_filepath,'r')
     intended_time_axis = input_h5_file['NRTimes'][...]
     num_modes = ((ell_max + 1) ** 2) - (ell_min ** 2)
 
@@ -104,9 +107,11 @@ def load_RIT_data(filename: str, strain_scale: float = 35, ell_min: int = 2,
         dom_phase_group['Y'][...], # note: RIT data has DECREASING phase
         k=dom_phase_group['deg'][...]
     )
+    BH_phase_array = 0.5 * dom_phase_spline(intended_time_axis)
+    BH_phase_TS = sxs.TimeSeries(BH_phase_array, intended_time_axis)
 
     omega_spline = dom_phase_spline.derivative()
-    angular_velocity_BHs = -0.5 * omega_spline(intended_time_axis)
+    angular_velocity_BHs = 0.5 * omega_spline(intended_time_axis)
     omega_calculated_TS = sxs.TimeSeries(angular_velocity_BHs, intended_time_axis)
 
     """plt.plot(intended_time_axis, angular_velocity_BHs, label='omega')
@@ -152,7 +157,60 @@ def load_RIT_data(filename: str, strain_scale: float = 35, ell_min: int = 2,
     )
     print(f"Strain modes loaded. Time range: {strain_waveforms_obj.t[0]:.2f}M to {strain_waveforms_obj.t[-1]:.2f}M.")
 
-    return strain_waveforms_obj, omega_calculated_TS
+    if not os.path.exists(metadata_filepath):
+        print(f"Error: File not found at '{metadata_filepath}'")
+        return None
+
+
+    # The specific keys we are looking for in the file
+    target_keys = ['initial-separation', 'initial-mass1', 'initial-mass2',
+        'initial-bh-chi1x', 'initial-bh-chi1y', 'initial-bh-chi1z',
+        'initial-bh-chi2x', 'initial-bh-chi2y', 'initial-bh-chi2z',
+        'final-mass', 'final-chi']
+    # Dictionary to store the values we find
+    parameters = dict.fromkeys(target_keys, 0)
+
+    print(f"Reading metadata from '{metadata_filepath}'...")
+
+    try:
+        with open(metadata_filepath, 'r') as f:
+            # Read the file line by line
+            for line in f:
+                # We only care about lines that contain an equals sign
+                if '=' in line:
+                    # Split the line at the '=' into a key and a value part
+                    # The '1' ensures we only split on the first '=', just in case
+                    # a value might also contain an equals sign.
+                    key, value_str = line.split('=', 1)
+                    
+                    # Clean up whitespace from the key
+                    key = key.strip()
+
+                    # If the cleaned key is one we're looking for...
+                    if key in target_keys:
+                        # Clean up whitespace from the value and convert it to a float
+                        value = float(value_str.strip())
+                        
+                        # Store the value in our dictionary
+                        parameters[key] = value
+                        print(f"  Found: {key} = {value}")
+
+    except Exception as e:
+        print(f"An error occurred while reading the file: {e}")
+        return None
+    
+    # Check if all required parameters were found
+    if None in parameters.values():
+        print("\nWarning: Not all target parameters were found in the file.")
+
+    print(parameters)
+    if value in parameters.values() == None:
+        value = 0
+
+    print(parameters)
+
+
+    return strain_waveforms_obj, omega_calculated_TS, BH_phase_array, parameters
 
 def pseudo_uniform_times(
         sample_times: np.ndarray,
@@ -238,6 +296,75 @@ def make_progress_signal_plot(dom_mode_signal: sxs.waveforms.WaveformModes,
     return plot_array
 
 
+def calculate_RIT_BH_data(omega_calculated_TS: sxs.TimeSeries,
+                          BH_phase_array: np.ndarray,
+                          metadata_dict: dict):
+    # extract all the parameters from the metadata dictionary
+    initial_separation = metadata_dict['initial-separation']
+    BH1_mass = metadata_dict['initial-mass1']
+    BH2_mass = metadata_dict['initial-mass2']
+    chi1_vector = np.fromiter(
+        (metadata_dict[key] for key in ['initial-bh-chi1x','initial-bh-chi1y', 'initial-bh-chi1z']),
+        dtype=float, count=3)
+    chi1_mag = np.linalg.norm(chi1_vector)
+    chi2_vector = np.fromiter(
+        (metadata_dict[key] for key in ['initial-bh-chi2x','initial-bh-chi2y', 'initial-bh-chi2z']),
+        dtype=float, count=3)
+    chi2_mag = np.linalg.norm(chi2_vector)
+    combined_mass = metadata_dict['final-mass']
+    combined_chi = metadata_dict['final-chi']
+
+    omega_array = omega_calculated_TS.ndarray
+    omega_time = omega_calculated_TS.time
+    total_mass = BH1_mass + BH2_mass
+    mu = (BH1_mass * BH2_mass) / total_mass
+    constant_part = (64 * (mu ** 2)) / (5 * BH1_mass * BH2_mass)
+    integral = scipy.integrate.cumulative_simpson(omega_array ** 6, x=omega_time, initial=0)
+    separation_scalar = ((initial_separation ** -5) + (5 * constant_part * integral)) ** (-1/5)
+    
+    # calculate coordinate centers for each BH in spherical coords, then convert to Cartesian
+    r_1 = (BH2_mass * separation_scalar) / total_mass
+    r_2 = (BH1_mass * separation_scalar) / total_mass
+    theta_both = np.full_like(r_1, np.pi/2)
+    phi_1 = BH_phase_array
+    phi_2 = phi_1 - np.pi
+    x_1 = r_1 * np.cos(phi_1) * np.sin(theta_both)
+    y_1 = r_1 * np.sin(phi_1) * np.sin(theta_both)
+    z_1 = r_1 * np.cos(theta_both)
+    x_2 = r_2 * np.cos(phi_2) * np.sin(theta_both)
+    y_2 = r_2 * np.sin(phi_2) * np.sin(theta_both)
+    z_2 = r_2 * np.cos(theta_both)
+    BH_A_coord_centers = np.stack((x_1, y_1, z_1), axis=-1)
+    BH_B_coord_centers = np.stack((x_2, y_2, z_2), axis=-1)
+
+    # 1 and 2 are used interchangeably with A and B, respectively. The final black hole formed is C
+    # 1 and 2 are generally referring to the RIT data, while A, B, C is the SXS object convention
+    merge_idx = np.argmax(separation_scalar < (total_mass * 2))
+    AB_time_array, C_time_array = omega_time[:merge_idx], omega_time[merge_idx:]
+    A_christodoulou_mass_array = BH1_mass * np.sqrt(2 / (1 + np.sqrt(1 - (chi1_mag ** 2))))
+    B_christodoulou_mass_array = BH2_mass * np.sqrt(2 / (1 + np.sqrt(1 - (chi2_mag ** 2))))
+    chi1_array = np.full((len(omega_time), 3), chi1_vector)
+    chi2_array = np.full((len(omega_time), 3), chi2_vector)
+    dimensionful_spin1_array = chi1_array * (A_christodoulou_mass_array ** 2)
+    dimensionful_spin2_array = chi2_array * (B_christodoulou_mass_array ** 2)
+
+    A_HQ_obj = sxs.horizons.HorizonQuantities(time=AB_time_array,
+        areal_mass=np.full_like(AB_time_array, BH1_mass),
+        christodoulou_mass=A_christodoulou_mass_array,
+        coord_center_inertial=BH_A_coord_centers,
+        dimensionful_inertial_spin=dimensionful_spin1_array,
+        chi_inertial=chi1_array, )
+    B_HQ_obj = sxs.horizons.HorizonQuantities(time=AB_time_array,
+        areal_mass=np.full_like(AB_time_array, BH2_mass),
+        christodoulou_mass=B_christodoulou_mass_array,
+        coord_center_inertial=BH_B_coord_centers,
+        dimensionful_inertial_spin=dimensionful_spin2_array,
+        chi_inertial=chi2_array)
+    horizons_obj = sxs.horizons.Horizons(A_HQ_obj, B_HQ_obj)
+    
+    return horizons_obj
+
+
 def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20, bh_elevation=0.):
     # --- Initial Data Extraction and Interpolation ---
     # If .interpolate() fails (e.g., time_vals outside original range AND
@@ -268,20 +395,20 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20, bh_ele
     C_chi_mag_data = np.interp(time_vals, horizons_obj.C.time, horizons_obj.C.chi_inertial_mag)
 
     # Extract NumPy data arrays from the TimeSeries objects
-    A_coords_data = np.asarray(A_coords_ts_at_times.data)
-    B_coords_data = np.asarray(B_coords_ts_at_times.data)
-    C_coords_data = np.asarray(C_coords_ts_at_times.data)
+    A_coords_data = A_coords_ts_at_times.ndarray
+    B_coords_data = B_coords_ts_at_times.ndarray
+    C_coords_data = C_coords_ts_at_times.ndarray
     A_coords_data[:, 2] = A_coords_data[:, 2] + bh_elevation
     B_coords_data[:, 2] = B_coords_data[:, 2] + bh_elevation
     C_coords_data[:, 2] = C_coords_data[:, 2] + bh_elevation
 
-    A_rad_data = 2 * np.asarray(A_mass_ts_at_times.data)
-    B_rad_data = 2 * np.asarray(B_mass_ts_at_times.data)
-    C_rad_data = 2 * np.asarray(C_mass_ts_at_times.data)
+    A_rad_data = 2 * A_mass_ts_at_times.ndarray
+    B_rad_data = 2 * B_mass_ts_at_times.ndarray
+    C_rad_data = 2 * C_mass_ts_at_times.ndarray
 
-    A_chi_data = np.asarray(A_chi_at_times.data)
-    B_chi_data = np.asarray(B_chi_at_times.data)
-    C_chi_data = np.asarray(C_chi_at_times.data)
+    A_chi_data = A_chi_at_times.ndarray
+    B_chi_data = B_chi_at_times.ndarray
+    C_chi_data = C_chi_at_times.ndarray
 
     # Use spin components, radii, and center coords of the BHs
     # to make the spin vectors start at the horizon of each BH in the direction of the spin
@@ -821,10 +948,11 @@ def create_color_opacity_transfer_functions(
 # --- Main Animation Logic ---
 def create_merger_movie():
     script_init_time = time.time()
-    if RIT_bool: strain_modes_obj, orbital_vel_TS = load_RIT_data(RIT_filename, RIT_STRAIN_SCALE)
+    if RIT_bool: strain_modes_obj, orbital_vel_TS, BH_phase_TS, metadata_dict = load_RIT_data(RIT_filename, metadata_filename, RIT_STRAIN_SCALE)
     else: strain_modes_obj, horizons_data = load_simulation_data(SXS_ID)
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
+    print(orbital_vel_TS[:10])
     
     start_back_prop = 0.65 # fraction of total sim time to go back from peak strain for the start
     end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
@@ -839,8 +967,6 @@ def create_merger_movie():
     anim_lab_times, anim_time_indices = pseudo_uniform_times(sample_times, peak_strain_time, start_back_prop, end_for_prop)
     print(f"Animation time: {anim_lab_times[0]:.2f}M to {anim_lab_times[-1]:.2f}M over {len(anim_lab_times)} frames.")
     print(f"Peak strain is around {peak_strain_time:.2f}M.")
-    mlab.figure(size=(1280, 1024), bgcolor=BG_COLOR)
-    # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
 
     x_axis = np.linspace(-MAX_XYZ, MAX_XYZ, POINTS_PER_DIM)
     y_axis = np.linspace(-MAX_XYZ, MAX_XYZ, POINTS_PER_DIM)
@@ -854,10 +980,14 @@ def create_merger_movie():
     print(min_strain, max_strain)
     max_strain, min_strain = CLIP_FRAC*max_strain, CLIP_FRAC*min_strain
     avg_peak_strain_amp = (max_strain - min_strain)/2
-    if not RIT_bool:
-        bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(
-        horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
-        spin_arrow_size *= 7
+
+    if RIT_bool:
+        print(metadata_dict)
+        horizons_data = calculate_RIT_BH_data(orbital_vel_TS, BH_phase_TS, metadata_dict)
+
+    bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(
+    horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
+    spin_arrow_size *= 7
 
     wav_filename = sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
     frame_files = []
@@ -874,8 +1004,12 @@ def create_merger_movie():
         strain_modes_obj, NUM_RINGS, ARM_LENGTH, r_axis, AZIMUTHAL_ANGLE)
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
+    mlab.figure(size=(1280, 1024), bgcolor=BG_COLOR)
+    # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
     print("Starting frame rendering loop...")
     strain_displacement_array = np.zeros((2, NUM_FRAMES))
+    progress_wave_strain = copy.deepcopy(strain_at_centers)
+    progress_wave_strain.t = strain_at_centers.t - MAX_XYZ
 
     for i_frame, current_lab_time in enumerate(anim_lab_times):
         if cone_test_bool:
@@ -977,7 +1111,7 @@ def create_merger_movie():
         w_buff = 10
         progress_plot_w, progress_plot_h = int(orig_pip_w - 2*w_buff), int(orig_pip_h // PROGRESS_WAVE_SCALE)
 
-        progress_plot_array = make_progress_signal_plot(h_lm_signal, anim_time_indices, i_frame,
+        progress_plot_array = make_progress_signal_plot(progress_wave_strain.real, anim_time_indices, i_frame,
                                                        progress_plot_w, progress_plot_h, BG_COLOR)
         main_arr[-progress_plot_h:, w_buff:-w_buff] = progress_plot_array
         if timing_bool:
