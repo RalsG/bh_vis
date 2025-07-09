@@ -28,7 +28,8 @@ RIT_bool = True
 RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
 metadata_filename = '/home/guest/Downloads/RIT_BBH_0001-n100-id3_Metadata.txt'
 if RIT_bool:
-    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace('/home/guest/Downloads/ExtrapStrain_', '')}_h_volume_uniform_times.mp4"
+    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace(
+        '/home/guest/Downloads/ExtrapStrain_', '')}_h_volume_PiP_movie.mp4"
 
 # Strain Visualization Parameters
 MAX_XYZ = 40.
@@ -107,7 +108,7 @@ def load_RIT_data(strain_filepath: str, metadata_filepath:str,
         dom_phase_group['Y'][...], # note: RIT data has DECREASING phase
         k=dom_phase_group['deg'][...]
     )
-    BH_phase_array = 0.5 * dom_phase_spline(intended_time_axis)
+    BH_phase_array = -0.5 * dom_phase_spline(intended_time_axis)
     BH_phase_TS = sxs.TimeSeries(BH_phase_array, intended_time_axis)
 
     omega_spline = dom_phase_spline.derivative()
@@ -168,7 +169,7 @@ def load_RIT_data(strain_filepath: str, metadata_filepath:str,
         'initial-bh-chi2x', 'initial-bh-chi2y', 'initial-bh-chi2z',
         'final-mass', 'final-chi']
     # Dictionary to store the values we find
-    parameters = dict.fromkeys(target_keys, 0)
+    parameters = dict.fromkeys(target_keys)
 
     print(f"Reading metadata from '{metadata_filepath}'...")
 
@@ -200,15 +201,10 @@ def load_RIT_data(strain_filepath: str, metadata_filepath:str,
         return None
     
     # Check if all required parameters were found
-    if None in parameters.values():
-        print("\nWarning: Not all target parameters were found in the file.")
-
-    print(parameters)
-    if value in parameters.values() == None:
-        value = 0
-
-    print(parameters)
-
+    for key in target_keys:
+        if parameters[key] == None:
+            print(f"Warning: Target parameter {key} not found in the file. Value set to 0")
+            parameters[key] = 0
 
     return strain_waveforms_obj, omega_calculated_TS, BH_phase_array, parameters
 
@@ -313,6 +309,7 @@ def calculate_RIT_BH_data(omega_calculated_TS: sxs.TimeSeries,
     chi2_mag = np.linalg.norm(chi2_vector)
     combined_mass = metadata_dict['final-mass']
     combined_chi = metadata_dict['final-chi']
+    combined_chi_vector = np.array((0, 0, combined_chi))
 
     omega_array = omega_calculated_TS.ndarray
     omega_time = omega_calculated_TS.time
@@ -321,12 +318,14 @@ def calculate_RIT_BH_data(omega_calculated_TS: sxs.TimeSeries,
     constant_part = (64 * (mu ** 2)) / (5 * BH1_mass * BH2_mass)
     integral = scipy.integrate.cumulative_simpson(omega_array ** 6, x=omega_time, initial=0)
     separation_scalar = ((initial_separation ** -5) + (5 * constant_part * integral)) ** (-1/5)
+    merge_idx = np.argmax(separation_scalar < (total_mass * 2))
+    separation_scalar_trimmed = separation_scalar[:merge_idx]
     
     # calculate coordinate centers for each BH in spherical coords, then convert to Cartesian
-    r_1 = (BH2_mass * separation_scalar) / total_mass
-    r_2 = (BH1_mass * separation_scalar) / total_mass
+    r_1 = (BH2_mass * separation_scalar_trimmed) / total_mass
+    r_2 = (BH1_mass * separation_scalar_trimmed) / total_mass
     theta_both = np.full_like(r_1, np.pi/2)
-    phi_1 = BH_phase_array
+    phi_1 = BH_phase_array[:merge_idx]
     phi_2 = phi_1 - np.pi
     x_1 = r_1 * np.cos(phi_1) * np.sin(theta_both)
     y_1 = r_1 * np.sin(phi_1) * np.sin(theta_both)
@@ -339,28 +338,42 @@ def calculate_RIT_BH_data(omega_calculated_TS: sxs.TimeSeries,
 
     # 1 and 2 are used interchangeably with A and B, respectively. The final black hole formed is C
     # 1 and 2 are generally referring to the RIT data, while A, B, C is the SXS object convention
-    merge_idx = np.argmax(separation_scalar < (total_mass * 2))
     AB_time_array, C_time_array = omega_time[:merge_idx], omega_time[merge_idx:]
-    A_christodoulou_mass_array = BH1_mass * np.sqrt(2 / (1 + np.sqrt(1 - (chi1_mag ** 2))))
-    B_christodoulou_mass_array = BH2_mass * np.sqrt(2 / (1 + np.sqrt(1 - (chi2_mag ** 2))))
-    chi1_array = np.full((len(omega_time), 3), chi1_vector)
-    chi2_array = np.full((len(omega_time), 3), chi2_vector)
-    dimensionful_spin1_array = chi1_array * (A_christodoulou_mass_array ** 2)
-    dimensionful_spin2_array = chi2_array * (B_christodoulou_mass_array ** 2)
+    AB_num_times = len(AB_time_array)
+    C_num_times = len(C_time_array)
+    BH_C_coord_centers = np.full((C_num_times, 3), (0, 0, 0))
+    A_christodoulou_mass = BH1_mass * np.sqrt(2 / (1 + np.sqrt(1 - (chi1_mag ** 2))))
+    B_christodoulou_mass = BH2_mass * np.sqrt(2 / (1 + np.sqrt(1 - (chi2_mag ** 2))))
+    C_christodoulou_mass = combined_mass * np.sqrt(2 / (1 + np.sqrt(1 - (combined_chi ** 2))))
+    A_christodoulou_mass_array = np.full(AB_num_times, A_christodoulou_mass)
+    B_christodoulou_mass_array = np.full(AB_num_times, B_christodoulou_mass)
+    C_christodoulou_mass_array = np.full(C_num_times, C_christodoulou_mass)
+    chi1_array = np.full((AB_num_times, 3), chi1_vector)
+    chi2_array = np.full((AB_num_times, 3), chi2_vector)
+    combined_chi_array = np.full((C_num_times, 3), combined_chi_vector)
+    dimensionful_spin1_array = chi1_array * (A_christodoulou_mass_array[:, np.newaxis] ** 2)
+    dimensionful_spin2_array = chi2_array * (B_christodoulou_mass_array[:, np.newaxis] ** 2)
+    dimensionful_combined_array = combined_chi_array * (C_christodoulou_mass_array[:, np.newaxis] ** 2)
 
     A_HQ_obj = sxs.horizons.HorizonQuantities(time=AB_time_array,
-        areal_mass=np.full_like(AB_time_array, BH1_mass),
+        areal_mass=np.full(AB_num_times, BH1_mass),
         christodoulou_mass=A_christodoulou_mass_array,
         coord_center_inertial=BH_A_coord_centers,
         dimensionful_inertial_spin=dimensionful_spin1_array,
         chi_inertial=chi1_array, )
     B_HQ_obj = sxs.horizons.HorizonQuantities(time=AB_time_array,
-        areal_mass=np.full_like(AB_time_array, BH2_mass),
+        areal_mass=np.full(AB_num_times, BH2_mass),
         christodoulou_mass=B_christodoulou_mass_array,
         coord_center_inertial=BH_B_coord_centers,
         dimensionful_inertial_spin=dimensionful_spin2_array,
         chi_inertial=chi2_array)
-    horizons_obj = sxs.horizons.Horizons(A_HQ_obj, B_HQ_obj)
+    C_HQ_obj = sxs.horizons.HorizonQuantities(time=C_time_array,
+        areal_mass=np.full(C_num_times, combined_mass),
+        christodoulou_mass=C_christodoulou_mass_array,
+        coord_center_inertial=BH_C_coord_centers,
+        dimensionful_inertial_spin=dimensionful_combined_array,
+        chi_inertial=combined_chi_array)
+    horizons_obj = sxs.horizons.Horizons(A=A_HQ_obj, B=B_HQ_obj, C=C_HQ_obj)
     
     return horizons_obj
 
@@ -952,9 +965,8 @@ def create_merger_movie():
     else: strain_modes_obj, horizons_data = load_simulation_data(SXS_ID)
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
-    print(orbital_vel_TS[:10])
     
-    start_back_prop = 0.65 # fraction of total sim time to go back from peak strain for the start
+    start_back_prop = 0.6 # fraction of total sim time to go back from peak strain for the start
     end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
@@ -1029,33 +1041,32 @@ def create_merger_movie():
             print(f"Evaluating strain grid took {(time.time() - temp_time):.2f}s")
         mlab.clf()
 
-        if not RIT_bool:
-            temp_time = time.time()
-            if current_lab_time < common_horizon_start:
-                # plot BH1
-                mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
-                spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                            line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1', opacity=0.7)
-                # plot BH2
-                mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 2')
-                spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                            line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2', opacity=0.7)
-            else:
-                # plot merged BH
-                mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
-                spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                            line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3', opacity=0.7)
-            if timing_bool:
-                print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
+        
+        temp_time = time.time()
+        if current_lab_time < common_horizon_start:
+            # plot BH1
+            mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
+            spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
+                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1', opacity=0.7)
+            # plot BH2
+            mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 2')
+            spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
+                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2', opacity=0.7)
+        else:
+            # plot merged BH
+            mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
+            spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
+                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3', opacity=0.7)
+        if timing_bool:
+            print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
         mlab.view(azimuth=45, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,BH_ELEVATION))
         pip_arr_large = mlab.screenshot(antialiased=True)
 
-        if not RIT_bool:
-            if current_lab_time < common_horizon_start:
-                spin1_obj.remove()
-                spin2_obj.remove()
-            else:
-                spin3_obj.remove()
+        if current_lab_time < common_horizon_start:
+            spin1_obj.remove()
+            spin2_obj.remove()
+        else:
+            spin3_obj.remove()
 
         # plot strain volume
         temp_time = time.time()
@@ -1106,8 +1117,7 @@ def create_merger_movie():
         new_pip_h, new_pip_w = int(orig_pip_h / PIP_SCALE), int(orig_pip_w / PIP_SCALE)
         pip_arr_resized = cv2.resize(pip_arr_large, (new_pip_w, new_pip_h), interpolation=cv2.INTER_AREA)
         # Paste the resized PiP array onto the main array
-        if not RIT_bool:
-            main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
+        main_arr[:new_pip_h, (orig_pip_w - new_pip_w):] = pip_arr_resized
         w_buff = 10
         progress_plot_w, progress_plot_h = int(orig_pip_w - 2*w_buff), int(orig_pip_h // PROGRESS_WAVE_SCALE)
 
