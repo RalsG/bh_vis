@@ -13,23 +13,42 @@ import time
 import inspect
 import sys
 
+data_source = 'BHaH' # Should be either 'SXS', 'RIT', or 'BHah'
+
 # --- Configuration Parameters ---
+# SXS info
 SXS_ID = "SXS:BBH:0001"
 OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_uniform_times.mp4"
 auto_loop_bool = False # option to make many movies
 sxs_idx_start = 164
 loop_size = 3
-NUM_FRAMES = 400
-FPS = 24
+
+# RIT info
+RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
+metadata_filename = '/home/guest/Downloads/RIT_BBH_0001-n100-id3_Metadata.txt'
+if data_source == 'RIT':
+    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace(
+        '/home/guest/Downloads/ExtrapStrain_', '')}_h_volume_PiP_movie.mp4"
+
+# BHaH info
+BHaH_strain_folder = "/home/guest/ralston_scripts/bh_vis/new_sxs_work/strain_data"
+extraction_radius_str = "100"
+BHaH_horizon_folder = "/home/guest/GW150914_baikalvacuum"
+N_THETA_AH = 32
+N_PHI_AH = 65
+# Time separating *supplied* AH data files
+# not the time step in between actual AHA interations
+ITERATION_TIME_STEP = 0.55
+# Usually only every x iterations are actually supplied
+# e.g. data goes from h.t0000000.ah1.gp to h.t0000044.ah1.gp
+ITERATION_NAME_STEP = 44
+
+# General visualization parameters
 timing_bool = False
 colorbar_bool = False
 cone_test_bool = False
-RIT_bool = True
-RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
-metadata_filename = '/home/guest/Downloads/RIT_BBH_0001-n100-id3_Metadata.txt'
-if RIT_bool:
-    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace(
-        '/home/guest/Downloads/ExtrapStrain_', '')}_h_volume_PiP_movie.mp4"
+NUM_FRAMES = 400
+FPS = 24
 
 # Strain Visualization Parameters
 MAX_XYZ = 40.
@@ -48,6 +67,7 @@ VALUES_TO_BE_OPAQUE = np.array([0.95, -0.55, -0.35, -0.17, 0.17, 0.35, 0.55, 0.9
 # VALUES_TO_BE_OPAQUE = np.delete(np.linspace(0.1, 0.6, 6), 5)
 CLIP_FRAC = 0.9
 
+# LIGO arm parameters
 NUM_RINGS = 1
 ARM_LENGTH = 0.6 * MAX_XYZ
 r_axis = np.array([MAX_XYZ])
@@ -65,7 +85,7 @@ antial_bool = False
 
 
 # --- Helper Functions ---
-def load_simulation_data(sxs_id_str):
+def load_sxs_data(sxs_id_str):
     print(f"Loading simulation: {sxs_id_str}")
     try:
         simulation = sxs.load(sxs_id_str, download=True, progress=True,
@@ -207,6 +227,95 @@ def load_RIT_data(strain_filepath: str, metadata_filepath:str,
             parameters[key] = 0
 
     return strain_waveforms_obj, omega_calculated_TS, BH_phase_array, parameters
+
+def load_BHaH_data(strain_folder: str, horizon_folder: str,
+                   time_step: float = 0.55, name_step: int = 44,
+                   radius_str: str = '100', n_theta: int = 32, n_phi: int = 65,
+                   strain_scale: float = 35, ell_min: int = 2, ell_max: int = 8,
+                   spin_weight: int = -2, dom_ell: int = 2, dom_em: int = 2):
+
+    extraction_radius = float(radius_str)
+    time_array_loaded = False
+    num_modes = ((ell_max + 1) ** 2) - (ell_min ** 2)
+
+    for ell in range(ell_min, ell_max + 1):
+        filename = f"h_l{ell}_r{radius_str}.txt"
+        filepath = os.path.join(strain_folder, filename)
+        try:
+            raw_file_data = np.loadtxt(filepath, comments='#')
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Data file not found: {filepath}. "
+                f"Ensure all files for l={ell_min} to l={ell_max} exist in '{strain_folder}'."
+            )
+        except Exception as e:
+            raise IOError(f"Error loading or parsing data from {filepath}: {e}")
+
+        if raw_file_data.ndim == 0:
+            raise ValueError(f"File {filepath} is empty or contains insufficient data (loaded as scalar).")
+        if raw_file_data.ndim == 1: # Single line of data
+            raw_file_data = raw_file_data.reshape(1, -1)
+        if raw_file_data.shape[0] == 0: # No data rows after comments
+            raise ValueError(f"File {filepath} contains no data rows after parsing comments.")
+        
+        expected_num_cols = 1 + 2 * (2 * ell + 1) # 1 (time) + 2*(Re/Im) * (2*ell+1 modes)
+        if raw_file_data.shape[1] != expected_num_cols:
+            raise ValueError(
+                f"File {filepath} has {raw_file_data.shape[1]} columns, "
+                f"but {expected_num_cols} were expected for l={ell}."
+            )
+
+        current_file_time_array = raw_file_data[:, 0]
+        if not time_array_loaded:
+            time_array = current_file_time_array
+            if len(time_array) < 4: # Cubic spline (k=3) needs at least k+1=4 points
+                raise ValueError(
+                    f"Time data in {filepath} (l={ell}) has {len(time_array)} points. "
+                    f"At least 4 data points are required for cubic spline interpolation."
+                )
+            if not np.all(np.diff(time_array) > 0):
+                raise ValueError(
+                    f"Time data in {filepath} (l={ell}) must be strictly increasing."
+                )
+            time_array_loaded = True
+            all_l_modes_data_array = np.empty((len(time_array), num_modes), dtype=np.complex128)
+        else:
+                if not np.array_equal(time_array, current_file_time_array):
+                     raise ValueError(
+                        f"Time column in {filepath} (l={ell}) does not match "
+                        f"the time column from the first loaded file (e.g., l={ell_min})."
+                    )
+                
+        num_times = len(time_array)
+
+        for em in range(-ell, ell + 1): # m_idx from 0 to 2*ell
+            real_col_idx = 1 + (2 * (em + ell))
+            imag_col_idx = 1 + (2 * (em + ell)) + 1
+            real_part = raw_file_data[:, real_col_idx]
+            imag_part = raw_file_data[:, imag_col_idx]
+
+            out_idx = ell + em + (ell ** 2) - (ell_min ** 2)
+            all_l_modes_data_array[:, out_idx] = (real_part + 1j * imag_part) / extraction_radius
+        
+    if not time_array_loaded:
+            raise RuntimeError("No data was successfully loaded. Ensure data_directory and files are correct.")
+
+    strain_waveforms_obj = sxs.waveforms.WaveformModes(
+        all_l_modes_data_array, time_array, time_axis=0, modes_axis=1,
+        ell_min=ell_min, ell_max=ell_max, spin_weight=spin_weight
+    )
+
+    phase_array = np.unwrap(np.angle(all_l_modes_data_array[:, 4]))
+    plt.plot(time_array, all_l_modes_data_array[:, 4].real, label='l2 m2 waveform')
+    plt.plot(time_array, all_l_modes_data_array[:, 0].real, label='l2 m-2 waveform')
+    # plt.plot(time_array, phase_array, label='unwrapped phase')
+    # plt.plot(time_array, np.gradient(phase_array, time_array), label="strain signal frequency")
+    plt.legend()
+    plt.show()
+
+    orbital_velocity_TS = sxs.TimeSeries(0.5 * np.gradient(phase_array, time_array), time_array, axis=0)
+
+    return strain_waveforms_obj, orbital_velocity_TS
 
 def pseudo_uniform_times(
         sample_times: np.ndarray,
@@ -961,8 +1070,10 @@ def create_color_opacity_transfer_functions(
 # --- Main Animation Logic ---
 def create_merger_movie():
     script_init_time = time.time()
-    if RIT_bool: strain_modes_obj, orbital_vel_TS, BH_phase_TS, metadata_dict = load_RIT_data(RIT_filename, metadata_filename, RIT_STRAIN_SCALE)
-    else: strain_modes_obj, horizons_data = load_simulation_data(SXS_ID)
+    if data_source == 'RIT': strain_modes_obj, orbital_vel_TS, BH_phase_TS, metadata_dict = load_RIT_data(RIT_filename, metadata_filename, RIT_STRAIN_SCALE)
+    if data_source == 'BHaH': strain_modes_obj, orbital_vel_TS = load_BHaH_data(BHaH_strain_folder, BHaH_horizon_folder, ITERATION_TIME_STEP,
+                                                                                ITERATION_NAME_STEP, extraction_radius_str, N_THETA_AH, N_PHI_AH)
+    else: strain_modes_obj, horizons_data = load_sxs_data(SXS_ID)
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
@@ -970,8 +1081,8 @@ def create_merger_movie():
     end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
-    if RIT_bool: common_horizon_start = 0.0
-    else: common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
+    if data_source == 'RIT': common_horizon_start = 0.0
+    elif data_source == 'SXS': common_horizon_start = (horizons_data.A.time[-1] + horizons_data.C.time[0])/2
     h_lm_signal = strain_modes_obj[:, strain_modes_obj.index(dom_l, dom_m)]
     peak_strain_time = strain_modes_obj.max_norm_time()
     sample_times = strain_modes_obj.t
@@ -993,13 +1104,14 @@ def create_merger_movie():
     max_strain, min_strain = CLIP_FRAC*max_strain, CLIP_FRAC*min_strain
     avg_peak_strain_amp = (max_strain - min_strain)/2
 
-    if RIT_bool:
+    if data_source == 'RIT':
         print(metadata_dict)
         horizons_data = calculate_RIT_BH_data(orbital_vel_TS, BH_phase_TS, metadata_dict)
 
-    bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(
-    horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
-    spin_arrow_size *= 7
+
+    if (data_source == 'RIT') or (data_source == 'SXS'):
+        bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
+        spin_arrow_size *= 7
 
     wav_filename = sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
     frame_files = []
@@ -1172,9 +1284,8 @@ def create_merger_movie():
 
 if __name__ == "__main__":
     if auto_loop_bool:
-        #for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
-        if not RIT_bool:
-            for sxs_idx in [1, 165, 166, 150]:
+        if data_source == 'SXS':
+            for sxs_idx in range(sxs_idx_start, sxs_idx_start + loop_size):
                 SXS_ID = f"SXS:BBH:{sxs_idx:04d}"
                 OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_g_volume_with_noise_and_arms_auto.mp4"
                 create_merger_movie()
