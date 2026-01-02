@@ -7,8 +7,6 @@ The BH@H Visualization Toolkit provides a foundation for visualizing simulation 
 
 </br>
 
-*NOTE: If you're already familiar with and prefer the visualization software [VisIt](https://visit-dav.github.io/visit-website/index.html), older tools originally used to develop this repository can be found in the [deprecated VisIt branch](https://github.com/tyndalestutz/bh_vis/tree/tyndalestutz/deprecated-visit_tools).*
-
 </br>
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT) ![Uses Mayavi](https://img.shields.io/badge/uses-Mayavi-blue.svg) ![Contributions Welcome](https://img.shields.io/badge/Contributions-Welcome!-brightgreen)
@@ -23,7 +21,7 @@ If you'd like to skip straight to usage, run the following lines to get started.
 #### Windows
 
 ```
-git clone https://github.com/tyndalestutz/bh_vis.git
+git clone https://github.com/RalsG/bh_vis.git
 cd bh_vis
 Python -m venv .venv
 .venv/scripts/Activate.ps1
@@ -33,7 +31,7 @@ pip install -r requirements.txt
 #### UNIX/OSX
 
 ```
-git clone https://github.com/tyndalestutz/bh_vis.git
+git clone https://github.com/RalsG/bh_vis.git
 cd bh_vis
 python3 -m venv .venv
 source .venv/bin/activate
