@@ -12,7 +12,10 @@ The BH@H Visualization Toolkit provides a foundation for visualizing simulation 
 
 ## Usage
 
-Whether you have your own data or you'd like to tinker with our sample data, simply clone this repository into a new folder and navigate to [the comprehensive step-by-step guide](jupyter_notebooks/Tutorial-Start_to_Finish-Psi4_to_mp4.ipynb) to create your first movie!
+Whether you have your own data or you'd like to use existing databases, simply clone this repository into a new folder and navigate to [the comprehensive step-by-step guide](jupyter_notebooks/Tutorial-Start_to_Finish-Psi4_to_mp4.ipynb) to create your first movie!
+
+The `primary_scripts` folder has all you need to make a polished 3D movie using either $\psi_4$ or strain ($h$) data from your own runs using Einstein Toolkit/BHaH or existing simulations from the SXS and RIT databases.
+The `auxiliary_scripts` folder is mostly older or incomplete visualization styles I experimented with, but they should all work with the SXS database if you're curious.
 
 If you'd like to skip straight to usage, run the following lines to get started.
 
