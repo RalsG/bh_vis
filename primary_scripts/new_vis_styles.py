@@ -13,7 +13,7 @@ import time
 import inspect
 import sys
 
-data_source = 'BHaH' # Should be either 'SXS', 'RIT', or 'BHah'
+data_source = 'SXS' # Should be either 'SXS', 'RIT', or 'BHah'
 
 # --- Configuration Parameters ---
 # SXS info
