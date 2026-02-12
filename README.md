@@ -50,11 +50,4 @@ If you haven't already, check out [(bh@h)](https://blackholesathome.net/blackhol
 2. [(SXS Collaboration)](https://data.black-holes.org/waveforms/index.html)
 ## Contributing
 
-Pull requests are welcome! If you'd like to add or fix anything, follow these steps:
-
-1. Fork the repository to your own GitHub account.
-2. `git clone` your forked repository.
-3. `git checkout -b <my-branch-name>` to create a branch, replacing with your actual branch name.
-4. Add your features or bug fixes.
-5. `git push origin <my-branch-name>` to push your branch to your forked repository.
-6. Head back to the upstream `RalsG/bh_vis` repository and submit a pull request using your branch from your forked repository.
+Pull requests and forks are welcome!
