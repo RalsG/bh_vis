@@ -1,6 +1,6 @@
 # BH@H Visualization Toolkit
 
-![GRMHD](assets/mesh_wave2D.png)
+![mesh wave](assets/mesh_wave2D.png)
 
 
 This BH@H Visualization Toolkit provides a foundation for visualizing simulation data produced by the [BlackHoles@Home](https://blackholesathome.net/) project (and others) using Python and [Mayavi](https://docs.enthought.com/mayavi/mayavi/). 
