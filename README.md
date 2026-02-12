@@ -3,7 +3,7 @@
 ![GRMHD](assets/mesh_wave2D.png)
 
 
-The BH@H Visualization Toolkit provides a foundation for visualizing simulation data produced by the [BlackHoles@Home](https://blackholesathome.net/) project (and others) using Python and [Mayavi](https://docs.enthought.com/mayavi/mayavi/). 
+This BH@H Visualization Toolkit provides a foundation for visualizing simulation data produced by the [BlackHoles@Home](https://blackholesathome.net/) project (and others) using Python and [Mayavi](https://docs.enthought.com/mayavi/mayavi/). 
 
 </br>
 
@@ -17,7 +17,7 @@ Whether you have your own data or you'd like to use existing databases, simply c
 The `primary_scripts` folder has all you need to make a polished 3D movie using either $\psi_4$ or strain ($h$) data from your own runs using Einstein Toolkit/BHaH or existing simulations from the SXS and RIT databases.
 The `auxiliary_scripts` folder is mostly older or incomplete visualization styles I experimented with, but they should all work with the SXS database if you're curious.
 
-If you'd like to skip straight to usage, run the following lines to get started.
+To use the scripts, run the following lines to get started:
 
 #### Windows
 
@@ -39,14 +39,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-To use these scripts with your own data, take a look at [this brief explanation](jupyter_notebooks/Tutorial-Compatible_Data_Formats.ipynb) of compatible data formats, along with instructions to prepare your data.
+To use these scripts with your own data, take a look at the `primary_scripts/psi4_to_strain.py` file, which (as the name suggests) converts $\psi_4$ data stored as time series SWSH coefficients into strain ($h$) stored in the same way. It requires the extraction radius and minimum and maximum $\mathcal{l}$ numbers (integer degree) of your data, as well as the final time step size and a cutoff factor to trim longer signals. This option is designed to work with BHaH data, so the final visualization script will prefer horizon data from the BlackHoles@Home Apparent Horizon Algorithm (BHaHAHA). As mentioned below, capability for additional data formats is welcome.
 
-## Troubleshooting  `animation_main.py`
-Depending on your system, Mayavi might require some adjustments in order to properly render. To fix the Linux graphics issue with `libstdcxx` and `OpenGL` rendering, try installing the dependencies through conda:
-
-```
-conda install -c conda-forge libstdcxx-ng
-```
 
 ## Resources
 
@@ -63,4 +57,4 @@ Pull requests are welcome! If you'd like to add or fix anything, follow these st
 3. `git checkout -b <my-branch-name>` to create a branch, replacing with your actual branch name.
 4. Add your features or bug fixes.
 5. `git push origin <my-branch-name>` to push your branch to your forked repository.
-6. Head back to the upstream `tyndalestutz/bh_vis` repository and submit a pull request using your branch from your forked repository.
+6. Head back to the upstream `RalsG/bh_vis` repository and submit a pull request using your branch from your forked repository.
