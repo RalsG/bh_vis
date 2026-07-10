@@ -7,7 +7,7 @@ This BH@H Visualization Toolkit provides a foundation for visualizing simulation
 
 </br>
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT) ![Uses Mayavi](https://img.shields.io/badge/uses-Mayavi-blue.svg) ![Contributions Welcome](https://img.shields.io/badge/Contributions-Welcome!-brightgreen)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT) ![Uses Mayavi](https://img.shields.io/badge/uses-Mayavi-yellow.svg) ![Uses PyVista](https://img.shields.io/badge/uses-PyVista-purple.svg) ![Contributions Welcome](https://img.shields.io/badge/Contributions-Welcome!-brightgreen)
 
 ### Mayavi Deprecation Note:
 Mayavi, which these codes have used since the previous generation of our group's undergrads, is no longer actively maintained and is incompatible with some of the more recent versions of Python. For this reason, I'll be porting them over to PyVista, a very similar library that is also built on top of VTK. Some of the older visualization style scripts won't be included since we don't use them anymore, but it's still possible to use them with Mayavi (using specific versions of some dependencies), or simply port it yourself (ask your favorite LLM, it should be a fairly minor change).
