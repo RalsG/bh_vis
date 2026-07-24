@@ -84,7 +84,7 @@ MAIN_CAMERA_DISTANCE = MAX_XYZ * 10.
 BH_ELEVATION = 0 # Set 0 or a positive float to have the BHs rotate above the strain surface
 PIP_SCALE = 4.0 # This is the ratio of window to PiP
 PROGRESS_WAVE_SCALE = 8 # ratio of window to progress waveform heigt at bottom
-antial_bool = False
+enable_antialiasing = True
 
 
 # --- Helper Functions ---
@@ -1254,7 +1254,7 @@ def create_merger_movie():
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
     plotter = pv.Plotter(off_screen=True, window_size=(1280, 1024))
     plotter.set_background(BG_COLOR)
-    if antial_bool:
+    if enable_antialiasing:
         plotter.enable_anti_aliasing()
     print("Starting frame rendering loop...")
     strain_displacement_array = np.zeros((2, NUM_FRAMES))
