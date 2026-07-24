@@ -1,8 +1,8 @@
 import numpy as np
 import sxs
-from mayavi import mlab
+import pyvista as pv
 import matplotlib.pyplot as plt
-from tvtk.api import tvtk
+from matplotlib.colors import Colormap
 import h5py
 import scipy # Eventually switch over to full moviepy, not urgent
 import cv2
@@ -27,8 +27,10 @@ loop_size = 3
 RIT_filename = '/home/guest/Downloads/ExtrapStrain_RIT-BBH-0001-n100.h5'
 metadata_filename = '/home/guest/Downloads/RIT_BBH_0001-n100-id3_Metadata.txt'
 if data_source == 'RIT':
-    OUTPUT_MOVIE_FILENAME = f"{RIT_filename[:-3].replace(
-        '/home/guest/Downloads/ExtrapStrain_', '')}_h_volume_PiP_movie.mp4"
+    rit_output_name = RIT_filename[:-3].replace(
+        '/home/guest/Downloads/ExtrapStrain_', ''
+    )
+    OUTPUT_MOVIE_FILENAME = f"{rit_output_name}_h_volume_PiP_movie.mp4"
 
 # BHaH info
 BHaH_strain_folder = "/home/guest/ralston_scripts/bh_vis/new_sxs_work/strain_data"
@@ -59,12 +61,13 @@ GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.2, 0.2, 0.2)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
 OPACITY_SPIKE_WIDTH = 0.8 # Width of each opaque-ish region as a percentage of total data range 
-MAX_OPACITY = 0.4
+MAX_OPACITY = 0.1
 BASE_OPACITY = 0.0
 STRAIN_COLORMAP = 'gist_ncar'
 SPIKE_SHAPE = 'triangle' # options are 'triangle', 'box', or 'gaussian'
-VALUES_TO_BE_OPAQUE = np.array([0.95, -0.55, -0.35, -0.17, 0.17, 0.35, 0.55, 0.95]) # fractions of peak strain to make an opaque region around
+VALUES_TO_BE_OPAQUE = np.array([-0.95, -0.55, -0.35, -0.17, 0.17, 0.35, 0.55, 0.95]) # fractions of peak strain to make an opaque region around
 # VALUES_TO_BE_OPAQUE = np.delete(np.linspace(0.1, 0.6, 6), 5)
+TRANSFER_FUNCTION_SAMPLES = 4096
 CLIP_FRAC = 0.9
 
 # LIGO arm parameters
@@ -563,7 +566,7 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20, bh_ele
     theta_1d = np.linspace(0, np.pi, n_theta_bh)  # n_theta_bh points from 0 to pi
     phi_1d = np.linspace(0, 2 * np.pi, n_phi_bh)    # n_phi_bh points from 0 to 2pi
 
-    # Create 2D grids. For mlab.mesh, shapes should be (n_theta_bh, n_phi_bh)
+    # Create 2D grids for the structured horizon surface.
     # Using indexing='ij' makes theta_grid vary along rows, phi_grid along columns.
     # If you used `meshgrid(phi_1d, theta_1d)`, then shapes would be (n_phi_bh, n_theta_bh)
     # Let's stick to (n_rows=n_theta_bh, n_cols=n_phi_bh) for the mesh.
@@ -586,8 +589,7 @@ def get_bh_mesh_data(horizons_obj, time_vals, n_theta_bh=15, n_phi_bh=20, bh_ele
             if np.isnan(current_radius) or current_radius <= 1e-9 or np.any(np.isnan(current_center)):
                 # If radius is NaN, zero, negative or center is NaN, store None or empty arrays
                 # to indicate no valid surface at this time for this BH.
-                # Mayavi's mlab.mesh can handle x,y,z being single points if you want to "hide" it,
-                # or you can explicitly pass None and handle it in the animation loop.
+                # Store None so the rendering loop can skip unavailable horizons.
                 surfaces_along_time[i].append(None) # Or (np.array([]), np.array([]), np.array([]))
                 continue
 
@@ -956,27 +958,27 @@ def create_color_opacity_transfer_functions(
     isosurface_values: list[float],
     data_range: tuple[float, float],
     spike_width_percent: float = 2.0,
-    max_opacity: float = 0.3,
+    max_opacity: float = 0.1,
     base_opacity: float = 0.0,
     colormap: str = 'hsv',
     spike_shape: str = 'triangle' # or 'box' or 'gaussian'
-) -> tuple[tvtk.ColorTransferFunction, tvtk.PiecewiseFunction]:
+) -> tuple[Colormap, np.ndarray]:
     """
-    Creates customized color and opacity transfer functions for volume rendering.
+    Create a Matplotlib color map and sampled opacity transfer function for PyVista.
 
     This function generates opacity spikes at specified scalar values, allowing for
     the simulation of multiple isosurfaces or highlighted regions within a volume.
 
     Args:
-        values (List[Scalar]):
+        isosurface_values (List[Scalar]):
             A list of floats where opacity spikes should be centered, ranging from -1. to 1.
         data_range (Tuple[Scalar, Scalar]):
             The (min, max) range of the scalar data.
-        width_percent (float, optional):
+        spike_width_percent (float, optional):
             The width of each opacity spike as a percentage of the data_range.
             Defaults to 2.0.
         max_opacity (float, optional):
-            The peak opacity for the spikes (0.0 to 1.0). Defaults to 0.8.
+            The peak opacity for the spikes (0.0 to 1.0). Defaults to 0.1.
         base_opacity (float, optional):
             The baseline opacity for all other data values. Defaults to 0.0.
         colormap (str, optional):
@@ -986,86 +988,190 @@ def create_color_opacity_transfer_functions(
             Defaults to 'triangle'.
 
     Returns:
-        Tuple[tvtk.ColorTransferFunction, tvtk.PiecewiseFunction]:
-            A tuple containing the configured tvtk color and opacity functions.
+        Tuple[Colormap, np.ndarray]:
+            The configured Matplotlib colormap and a sampled PyVista opacity lookup.
     """
     data_min, data_max = data_range
     if data_min >= data_max:
-        # Return empty, valid objects for an invalid data range
-        return tvtk.ColorTransferFunction(), tvtk.PiecewiseFunction()
+        raise ValueError("data_range must contain an increasing (min, max) pair")
+    if spike_width_percent <= 0:
+        raise ValueError("spike_width_percent must be positive")
+    if spike_shape not in {'triangle', 'box', 'gaussian'}:
+        raise ValueError(
+            "spike_shape must be one of 'triangle', 'box', or 'gaussian'"
+        )
 
-    # 1. Create the transfer function objects
-    otf = tvtk.PiecewiseFunction()
-    ctf = tvtk.ColorTransferFunction()
-
-    # 2. Get the colormap object from Matplotlib
-    # Use the modern, recommended API
     cmap = plt.get_cmap(colormap)
-    cmap_for_lut = plt.get_cmap(colormap, 256)(np.arange(256))
-    lut_out = (cmap_for_lut * 255).astype(np.uint8)
-
-    # 3. Define the base opacity across the entire data range
-    # This ensures regions without spikes have the specified base opacity.
-    otf.add_point(data_min, base_opacity)
-    otf.add_point(data_max, base_opacity)
     data_width = data_max - data_min
-
-    # 4. Create opacity spikes and corresponding color points
-    # Calculate the absolute width of the spike from the percentage
     scalar_width = (spike_width_percent / 100.0) * data_width
     half_width = scalar_width / 2.0
+    scalar_samples = np.linspace(
+        data_min, data_max, TRANSFER_FUNCTION_SAMPLES, endpoint=True
+    )
+    opacity_lookup = np.full(
+        TRANSFER_FUNCTION_SAMPLES, base_opacity, dtype=float
+    )
 
     for val in sorted(isosurface_values):
-        opacity_multiplier = abs(val) ** 1/5
+        opacity_multiplier = abs(val) ** (1/2) # make the higher-valued strains more opaque
         val_opacity = max_opacity * opacity_multiplier
-        # Normalize the value to sample the colormap
         norm_val = (val/2) + 0.5
         data_val = (norm_val * data_width) + data_min
-        color = cmap(np.clip(norm_val, 0.0, 1.0)) # Clip to handle values outside range
+        normalized_distance = np.abs(scalar_samples - data_val) / half_width
+        in_spike = normalized_distance <= 1.0
 
-        # Add the color point at the center of the spike
-        ctf.add_rgb_point(data_val, color[0], color[1], color[2])
-
-        # Define the spike region, ensuring it stays within the data range
-        start = np.clip(data_val - half_width, data_min, data_max)
-        end = np.clip(data_val + half_width, data_min, data_max)
-        center = np.clip(data_val, data_min, data_max)
-
-        # Add points to the opacity function based on the chosen shape
         if spike_shape == 'triangle':
-            # Smooth 5-point spike
-            otf.add_point(start, base_opacity)
-            otf.add_point(np.clip(data_val - half_width / 2.0, data_min, data_max), val_opacity * 0.3)
-            otf.add_point(center, val_opacity)
-            otf.add_point(np.clip(data_val + half_width / 2.0, data_min, data_max), val_opacity * 0.3)
-            otf.add_point(end, base_opacity)
+            # Preserve the original five-point shape: base, 30%, peak, 30%, base.
+            distance_in_spike = normalized_distance[in_spike]
+            spike_opacity = np.interp(
+                distance_in_spike,
+                (0.0, 0.5, 1.0),
+                (val_opacity, val_opacity * 0.3, base_opacity)
+            )
         elif spike_shape == 'box':
-            # Sharp 4-point "top-hat" spike
-            epsilon = data_width / 10000.0 # Tiny offset for vertical lines
-            otf.add_point(np.clip(start - epsilon, data_min, data_max), base_opacity)
-            otf.add_point(start, val_opacity)
-            otf.add_point(end, val_opacity)
-            otf.add_point(np.clip(end + epsilon, data_min, data_max), base_opacity)
-        elif spike_shape == 'gaussian':
-            # Create a smoother, more realistic falloff
-            # We add several points to approximate the curve
-            epsilon = data_width / 10000.0
-            otf.add_point(np.clip(start - epsilon, data_min, data_max), base_opacity)
-            otf.add_point(np.clip(end + epsilon, data_min, data_max), base_opacity)
-            for i in np.linspace(-1, 1, 15): # Use 15 points to define the curve
-                # Map i from [-1, 1] to the scalar range [start, end]
-                point_val = data_val + i * half_width
-                
-                # Gaussian function: exp(-x^2 / (2*sigma^2))
-                # Here, we use a simpler form where i is our normalized x
-                opacity = val_opacity * np.exp(-(i**2) * 2.5) # The 2.5 is a shape factor
-                
-                # Clip the point and ensure it doesn't dip below base_opacity
-                clipped_val = np.clip(point_val, data_min, data_max)
-                final_opacity = max(opacity, base_opacity)
-                otf.add_point(clipped_val, final_opacity)
+            spike_opacity = np.full(np.count_nonzero(in_spike), val_opacity)
+        else:
+            spike_opacity = val_opacity * np.exp(
+                -(normalized_distance[in_spike] ** 2) * 2.5
+            )
 
-    return ctf, otf, lut_out
+        spike_opacity = np.maximum(spike_opacity, base_opacity)
+        opacity_lookup[in_spike] = np.maximum(
+            opacity_lookup[in_spike], spike_opacity
+        )
+
+        # Keep the sampled transfer function's peak equal to the requested peak.
+        if data_min <= data_val <= data_max:
+            peak_idx = np.abs(scalar_samples - data_val).argmin()
+            opacity_lookup[peak_idx] = max(
+                opacity_lookup[peak_idx], val_opacity
+            )
+
+    return cmap, np.clip(opacity_lookup, 0.0, 1.0)
+
+
+def set_plotter_camera(
+    plotter: pv.Plotter,
+    azimuth: float,
+    elevation: float,
+    distance: float,
+    focal_point: tuple[float, float, float]
+):
+    """Set a PyVista camera using the spherical parameters used by Mayavi."""
+    azimuth_radians = np.deg2rad(azimuth)
+    elevation_radians = np.deg2rad(elevation)
+    focal_point_array = np.asarray(focal_point, dtype=float)
+    camera_offset = distance * np.array([
+        np.cos(elevation_radians) * np.cos(azimuth_radians),
+        np.cos(elevation_radians) * np.sin(azimuth_radians),
+        np.sin(elevation_radians)
+    ])
+    plotter.camera_position = [
+        tuple(focal_point_array + camera_offset),
+        tuple(focal_point_array),
+        (0.0, 0.0, 1.0)
+    ]
+
+
+def add_horizon_surface(
+    plotter: pv.Plotter,
+    surface: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
+    name: str
+):
+    """Add one structured black-hole horizon surface when data is available."""
+    if surface is None:
+        return None
+    return plotter.add_mesh(
+        pv.StructuredGrid(*surface),
+        color=(0, 0, 0),
+        opacity=1.0,
+        smooth_shading=True,
+        name=name
+    )
+
+
+def add_spin_arrow(
+    plotter: pv.Plotter,
+    spin_vector: np.ndarray,
+    scale_factor: float,
+    name: str
+):
+    """Add one spin arrow and return its removable actor."""
+    start = np.asarray(spin_vector[:3], dtype=float)
+    direction = np.asarray(spin_vector[3:], dtype=float)
+    if (
+        not np.all(np.isfinite(start))
+        or not np.all(np.isfinite(direction))
+        or np.linalg.norm(direction) == 0
+    ):
+        return None
+    return plotter.add_arrows(
+        start[np.newaxis, :],
+        direction[np.newaxis, :],
+        mag=scale_factor,
+        color=SPIN_ARROW_COLOR,
+        opacity=0.7,
+        name=name
+    )
+
+
+def add_ligo_geometry(
+    plotter: pv.Plotter,
+    x_centers: np.ndarray,
+    y_centers: np.ndarray,
+    z_centers: np.ndarray,
+    x_vectors: np.ndarray,
+    y_vectors: np.ndarray,
+    z_vectors: np.ndarray
+):
+    """Render detector centers, displaced arms, and red arm overlays."""
+    center_points = np.stack(
+        (x_centers[..., 0], y_centers[..., 0], z_centers[..., 0]), axis=-1
+    ).reshape(-1, 3)
+    cube_size = MAX_XYZ / 12.5
+    for center in center_points:
+        plotter.add_mesh(
+            pv.Cube(
+                center=center,
+                x_length=cube_size,
+                y_length=cube_size,
+                z_length=cube_size
+            ),
+            color=(0.45, 0.45, 0.45),
+            opacity=0.9
+        )
+
+    arm_starts = np.stack((x_centers, y_centers, z_centers), axis=-1)
+    arm_vectors = np.stack((x_vectors, y_vectors, z_vectors), axis=-1)
+    line_points = []
+    for index in np.ndindex(arm_vectors.shape[:-1]):
+        start = arm_starts[index]
+        direction = arm_vectors[index]
+        arm_length = np.linalg.norm(direction)
+        if not np.isfinite(arm_length) or arm_length <= 0:
+            continue
+        endpoint = start + direction
+        cylinder = pv.Cylinder(
+            center=start + (direction / 2.0),
+            direction=direction,
+            radius=CYLINDER_RADIUS * ARM_LENGTH,
+            height=arm_length,
+            resolution=24
+        )
+        plotter.add_mesh(
+            cylinder,
+            color=(0.5, 0.5, 0.5),
+            opacity=0.7
+        )
+        line_points.extend((start, endpoint))
+
+    if line_points:
+        plotter.add_lines(
+            np.asarray(line_points),
+            color=(1.0, 0.15, 0.15),
+            width=4.0,
+            connected=False
+        )
 
 # --- Main Animation Logic ---
 def create_merger_movie():
@@ -1118,18 +1224,38 @@ def create_merger_movie():
     frames_dir_path = "frames"
     os.makedirs(frames_dir_path, exist_ok=True)
 
-    color_transfer_function, opacity_transfer_function, colorbar_lut = create_color_opacity_transfer_functions(
+    color_transfer_function, opacity_transfer_function = create_color_opacity_transfer_functions(
         VALUES_TO_BE_OPAQUE, (min_strain, max_strain), OPACITY_SPIKE_WIDTH, MAX_OPACITY,
         BASE_OPACITY, STRAIN_COLORMAP, SPIKE_SHAPE)
+    opacity_lookup_uint8 = np.round(
+        opacity_transfer_function * 255
+    ).astype(np.uint8)
     bar_top = 0.923
     bar_bottom = 0.149
     bar_height = bar_top - bar_bottom
+    colorbar_annotations = {
+        min_strain + (((frac / 2) + 0.5) * (max_strain - min_strain)):
+            f"{(frac * avg_peak_strain_amp):.3f}"
+        for frac in VALUES_TO_BE_OPAQUE
+    }
     x_LIGO, y_LIGO, z_LIGO, center_directions, strain_at_centers, x_centers, y_centers, z_centers = generate_ring_data(
         strain_modes_obj, NUM_RINGS, ARM_LENGTH, r_axis, AZIMUTHAL_ANGLE)
+
+    volume_grid = pv.ImageData(
+        dimensions=x_grid.shape,
+        spacing=(
+            x_axis[1] - x_axis[0],
+            y_axis[1] - y_axis[0],
+            z_axis[1] - z_axis[0]
+        ),
+        origin=(x_axis[0], y_axis[0], z_axis[0])
+    )
     
     print(f"Processing and surface building took {time.time() - data_loaded_time:.2f}s")
-    mlab.figure(size=(1280, 1024), bgcolor=BG_COLOR)
-    # mlab.options.offscreen = True # Ensure offscreen rendering for saving frames without GUI pop-up
+    plotter = pv.Plotter(off_screen=True, window_size=(1280, 1024))
+    plotter.set_background(BG_COLOR)
+    if antial_bool:
+        plotter.enable_anti_aliasing()
     print("Starting frame rendering loop...")
     strain_displacement_array = np.zeros((2, NUM_FRAMES))
     progress_wave_strain = copy.deepcopy(strain_at_centers)
@@ -1151,79 +1277,98 @@ def create_merger_movie():
             strain_at_centers, x_LIGO, y_LIGO, z_LIGO, x_centers, y_centers, z_centers, center_directions, r_axis, current_lab_time, STRAIN_SCALE)
         if timing_bool:
             print(f"Evaluating strain grid took {(time.time() - temp_time):.2f}s")
-        mlab.clf()
+        plotter.clear()
 
         
         temp_time = time.time()
+        spin_actors = []
         if current_lab_time < common_horizon_start:
             # plot BH1
-            mlab.mesh(*bh_surfs[0][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 1')
-            spin1_obj = mlab.quiver3d(*spin_vectors[0][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 1', opacity=0.7)
+            add_horizon_surface(
+                plotter, bh_surfs[0][i_frame], name='Event Horizon 1'
+            )
+            spin_actors.append(add_spin_arrow(
+                plotter, spin_vectors[0][:, i_frame], spin_arrow_size,
+                name='Spin 1'
+            ))
             # plot BH2
-            mlab.mesh(*bh_surfs[1][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 2')
-            spin2_obj = mlab.quiver3d(*spin_vectors[1][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 2', opacity=0.7)
+            add_horizon_surface(
+                plotter, bh_surfs[1][i_frame], name='Event Horizon 2'
+            )
+            spin_actors.append(add_spin_arrow(
+                plotter, spin_vectors[1][:, i_frame], spin_arrow_size,
+                name='Spin 2'
+            ))
         else:
             # plot merged BH
-            mlab.mesh(*bh_surfs[2][i_frame], opacity=1, color=(0, 0, 0), name='Event Horizon 3')
-            spin3_obj = mlab.quiver3d(*spin_vectors[2][:, i_frame], color=SPIN_ARROW_COLOR, mode='arrow',
-                        line_width = 0.4*spin_arrow_size, scale_factor = spin_arrow_size, name='Spin 3', opacity=0.7)
+            add_horizon_surface(
+                plotter, bh_surfs[2][i_frame], name='Event Horizon 3'
+            )
+            spin_actors.append(add_spin_arrow(
+                plotter, spin_vectors[2][:, i_frame], spin_arrow_size,
+                name='Spin 3'
+            ))
         if timing_bool:
             print(f"rendering BHs took {(time.time() - temp_time):.2f}s")
-        mlab.view(azimuth=45, elevation=60, distance=PIP_CAMERA_DISTANCE, focalpoint=(0,0,BH_ELEVATION))
-        pip_arr_large = mlab.screenshot(antialiased=True)
+        set_plotter_camera(
+            plotter, azimuth=45, elevation=60,
+            distance=PIP_CAMERA_DISTANCE, focal_point=(0, 0, BH_ELEVATION)
+        )
+        pip_arr_large = np.asarray(
+            plotter.screenshot(return_img=True, transparent_background=False)
+        )
 
-        if current_lab_time < common_horizon_start:
-            spin1_obj.remove()
-            spin2_obj.remove()
-        else:
-            spin3_obj.remove()
+        for spin_actor in spin_actors:
+            if spin_actor is not None:
+                plotter.remove_actor(spin_actor, render=False)
 
         # plot strain volume
         temp_time = time.time()
-        strain_field_source = mlab.pipeline.scalar_field(x_grid, y_grid, z_grid, strain_grid)
-        strain_cloud = mlab.pipeline.volume(strain_field_source, vmin=min_strain, vmax=max_strain)
-        volume_property = strain_cloud._volume_property
-        volume_property.set_scalar_opacity(opacity_transfer_function)
-        volume_property.set_color(color_transfer_function)
-        strain_cloud.module_manager.scalar_lut_manager.lut.table = colorbar_lut
-        if colorbar_bool:
-            mlab.colorbar(object=strain_cloud, orientation='vertical', nb_labels=0)
-            mlab.text(0.01, 0.96, "Real Polarized Strain (unscaled)", width=0.33, line_width=6)
-            for frac in VALUES_TO_BE_OPAQUE:
-                mlab.text(0.053, bar_bottom + ((frac/2) + 0.5)*bar_height, f"{(frac*avg_peak_strain_amp):.3f}", width=0.05)
+        volume_grid.point_data['strain'] = strain_grid.ravel(order='F')
+        plotter.add_volume(
+            volume_grid,
+            scalars='strain',
+            clim=(min_strain, max_strain),
+            cmap=color_transfer_function,
+            opacity=opacity_lookup_uint8,
+            n_colors=len(opacity_transfer_function),
+            blending='composite',
+            mapper='smart',
+            show_scalar_bar=colorbar_bool,
+            annotations=colorbar_annotations if colorbar_bool else None,
+            scalar_bar_args={
+                'title': "Real Polarized Strain (unscaled)",
+                'vertical': True,
+                'n_labels': 0,
+                'position_x': 0.01,
+                'position_y': bar_bottom,
+                'height': bar_height,
+                'use_opacity': False
+            },
+            reset_camera=False
+        )
         if timing_bool:
             print(f"Rendering strain volume took {(time.time() - temp_time):.2f}s")
 
         temp_time = time.time()
-        mlab.points3d(x_centers, y_centers, z_centers, mode='cube', color=(0.45, 0.45, 0.45), scale_factor=MAX_XYZ/12.5, opacity=0.9)
-        cylinder1_obj = mlab.quiver3d(x_centers[..., 0], y_centers[..., 0], z_centers[..., 0],
-                                      x_grid_for_plotting[..., 0], y_grid_for_plotting[..., 0],
-                                      z_grid_for_plotting[..., 0], scalars=displacement_scalars[..., 0],
-                                      mode='cylinder', color=(0.5, 0.5, 0.5), opacity=0.7,
-                                      scale_mode='vector', scale_factor=1, resolution=24)
-        adjustment_factor = ARM_LENGTH / displacement_scalars[0, 0, 0]
-        cylinder1_obj.glyph.glyph_source.glyph_source.radius = CYLINDER_RADIUS * adjustment_factor
-
-        cylinder2_obj = mlab.quiver3d(x_centers[..., 1], y_centers[..., 1], z_centers[..., 1],
-                                      x_grid_for_plotting[..., 1], y_grid_for_plotting[..., 1],
-                                      z_grid_for_plotting[..., 1], scalars=displacement_scalars[..., 1],
-                                      mode='cylinder', color=(0.5, 0.5, 0.5), opacity=0.7,
-                                      scale_mode='vector', scale_factor=1, resolution=24)
-        adjustment_factor = ARM_LENGTH / displacement_scalars[0, 0, 1]
-        cylinder2_obj.glyph.glyph_source.glyph_source.radius = CYLINDER_RADIUS * adjustment_factor
-        mlab.quiver3d(x_centers, y_centers, z_centers, x_grid_for_plotting, y_grid_for_plotting,
-                      z_grid_for_plotting, scalars=displacement_scalars, mode='2ddash',
-                      color=(1.0, 0.15, 0.15), opacity=1, scale_mode='vector', scale_factor=1, line_width=4.)
+        add_ligo_geometry(
+            plotter,
+            x_centers, y_centers, z_centers,
+            x_grid_for_plotting, y_grid_for_plotting, z_grid_for_plotting
+        )
         if timing_bool:
             print(f"Modeling LIGO took {(time.time() - temp_time):.2f}s")
 
         strain_displacement_array[:, i_frame] = np.squeeze(displacement_scalars)
 
         temp_time = time.time()
-        mlab.view(azimuth=45, elevation=70, distance=MAIN_CAMERA_DISTANCE, focalpoint=(0,0,0))
-        main_arr = mlab.screenshot(antialiased=True)
+        set_plotter_camera(
+            plotter, azimuth=45, elevation=70,
+            distance=MAIN_CAMERA_DISTANCE, focal_point=(0, 0, 0)
+        )
+        main_arr = np.asarray(
+            plotter.screenshot(return_img=True, transparent_background=False)
+        )
         # Resize PiP image
         orig_pip_h, orig_pip_w, _ = pip_arr_large.shape
         new_pip_h, new_pip_w = int(orig_pip_h / PIP_SCALE), int(orig_pip_w / PIP_SCALE)
@@ -1250,7 +1395,7 @@ def create_merger_movie():
             print(f"Frame saved to {frame_filename}. Rendered in {time.time() - frame_render_start_time:.2f}s.")
 
     if cone_test_bool:
-        mlab.close(all=True)
+        plotter.close()
         return
 
     plt.plot(anim_lab_times, strain_displacement_array[0, :], label='plane arm')
@@ -1279,7 +1424,7 @@ def create_merger_movie():
 
     print(f"Movie saved to {OUTPUT_MOVIE_FILENAME}")
     
-    mlab.close(all=True)
+    plotter.close()
     print(f"Total script execution time: {time.time() - script_init_time:.2f} seconds.")
 
 if __name__ == "__main__":

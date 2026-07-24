@@ -1,12 +1,11 @@
 sxs
-mayavi
+pyvista
 matplotlib
-tvtk
 h5py
 scipy
 numpy
 moviepy
-cv2
+opencv-python
 quaternionic
 spherical
 imageio
