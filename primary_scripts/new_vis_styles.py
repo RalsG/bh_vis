@@ -19,8 +19,8 @@ data_source = 'SXS' # Should be either 'SXS', 'RIT', or 'BHah'
 # SXS info
 SXS_ID = "SXS:BBH:0001"
 OUTPUT_MOVIE_FILENAME = f"{SXS_ID.replace(':', '_')}_h_volume_uniform_times.mp4"
-auto_loop_bool = False # option to make many movies
-sxs_idx_start = 164
+auto_loop_bool = True # option to make many movies
+sxs_idx_start = 1
 loop_size = 3
 
 # RIT info
@@ -47,9 +47,9 @@ ITERATION_NAME_STEP = 44
 
 # General visualization parameters
 timing_bool = False
-colorbar_bool = False
+colorbar_bool = True
 cone_test_bool = False
-NUM_FRAMES = 400
+NUM_FRAMES = 1200
 FPS = 24
 
 # Strain Visualization Parameters
@@ -61,7 +61,7 @@ GW_SURFACE_COLOR = (0.3, 0.6, 1.0) # Uniform color for the GW surface
 BG_COLOR = (0.2, 0.2, 0.2)
 SPIN_ARROW_COLOR = (0.85, 0.85, 0.1)
 OPACITY_SPIKE_WIDTH = 0.8 # Width of each opaque-ish region as a percentage of total data range 
-MAX_OPACITY = 0.1
+MAX_OPACITY = 0.4
 BASE_OPACITY = 0.0
 STRAIN_COLORMAP = 'gist_ncar'
 SPIKE_SHAPE = 'triangle' # options are 'triangle', 'box', or 'gaussian'
@@ -80,7 +80,7 @@ RIT_STRAIN_SCALE = MAX_XYZ / 70
 CYLINDER_RADIUS = 0.04 # Relative to scale of the glyph
 
 PIP_CAMERA_DISTANCE = 30
-MAIN_CAMERA_DISTANCE = MAX_XYZ * 4.5
+MAIN_CAMERA_DISTANCE = MAX_XYZ * 10.
 BH_ELEVATION = 0 # Set 0 or a positive float to have the BHs rotate above the strain surface
 PIP_SCALE = 4.0 # This is the ratio of window to PiP
 PROGRESS_WAVE_SCALE = 8 # ratio of window to progress waveform heigt at bottom
@@ -324,13 +324,13 @@ def pseudo_uniform_times(
         sample_times: np.ndarray,
         peak_strain_time: float,
         start_back_prop: float = 0.6,
-        end_for_prop: float = 0.15
+        end_forw_prop: float = 0.15
 ):
     sim_start_time = sample_times[0]
     sim_end_time = sample_times[-1]
     sim_total_time = sim_end_time - sim_start_time
     anim_start_time = peak_strain_time - (start_back_prop * sim_total_time)
-    anim_end_time = (end_for_prop * sim_total_time) + peak_strain_time
+    anim_end_time = (end_forw_prop * sim_total_time) + peak_strain_time
     anim_start_time = max(anim_start_time, sim_start_time)
     anim_end_time = min(anim_end_time, sim_end_time)
 
@@ -1183,8 +1183,8 @@ def create_merger_movie():
     data_loaded_time = time.time()
     print(f"Data loading took {data_loaded_time - script_init_time:.2f}s")
     
-    start_back_prop = 0.6 # fraction of total sim time to go back from peak strain for the start
-    end_for_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
+    start_back_prop = 0.35 # fraction of total sim time to go back from peak strain for the start
+    end_forw_prop = 0.3 # fraction of total sim time to go forwards from peak strain for the end
     dom_l, dom_m = 2, 2
 
     if data_source == 'RIT': common_horizon_start = 0.0
@@ -1193,7 +1193,7 @@ def create_merger_movie():
     peak_strain_time = strain_modes_obj.max_norm_time()
     sample_times = strain_modes_obj.t
 
-    anim_lab_times, anim_time_indices = pseudo_uniform_times(sample_times, peak_strain_time, start_back_prop, end_for_prop)
+    anim_lab_times, anim_time_indices = pseudo_uniform_times(sample_times, peak_strain_time, start_back_prop, end_forw_prop)
     print(f"Animation time: {anim_lab_times[0]:.2f}M to {anim_lab_times[-1]:.2f}M over {len(anim_lab_times)} frames.")
     print(f"Peak strain is around {peak_strain_time:.2f}M.")
 
@@ -1217,7 +1217,7 @@ def create_merger_movie():
 
     if (data_source == 'RIT') or (data_source == 'SXS'):
         bh_surfs, spin_vectors, spin_arrow_size, orbital_vel_TS = get_bh_mesh_data(horizons_data, anim_lab_times, bh_elevation = BH_ELEVATION)
-        spin_arrow_size *= 7
+        spin_arrow_size *= 12
 
     wav_filename = sonify_strain(h_lm_signal, orbital_vel_TS, anim_time_indices, NUM_FRAMES/FPS)
     frame_files = []
